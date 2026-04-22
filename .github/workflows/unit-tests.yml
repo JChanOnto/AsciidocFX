@@ -2,12 +2,30 @@ name: Unit tests
 
 on:
   push:
+    branches: [master, main]
   pull_request:
   workflow_dispatch:
 
+# Cancel any in-flight run for the same ref when a new commit lands.
+concurrency:
+  group: unit-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+# Restrict the GITHUB_TOKEN to read-only.  The job only runs tests; it does
+# not push commits, comment on PRs, or publish artifacts beyond a failure
+# upload.  Locking permissions down also avoids the "waiting for runner"
+# state some org policies trigger when a workflow asks for write scopes.
+permissions:
+  contents: read
+
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # Pin the runner image instead of the floating `ubuntu-latest` label.
+    # `ubuntu-latest` occasionally sits in the queue when GitHub flips its
+    # alias mid-rollout; an explicit version always picks up immediately.
+    runs-on: ubuntu-24.04
+    # Hard cap so a stuck job fails loudly instead of consuming minutes.
+    timeout-minutes: 20
 
     steps:
       - name: Checkout
@@ -20,16 +38,16 @@ jobs:
           java-version: '25'
           cache: maven
 
-      # The fork's unit tests target the new project-config / executable
-      # resolution code, which has no JavaFX or display dependencies.
-      # Restrict surefire to those classes so we don't pull in TestFX
-      # (which needs a display) on a headless CI runner.
+      # The fork's unit tests target the new project-config / executable /
+      # preview-source code, none of which has a JavaFX or display
+      # dependency.  Restrict surefire to those classes so we don't pull in
+      # TestFX (which needs a display) on a headless CI runner.
       # Jacoco 0.8.7 (pinned in pom) cannot instrument JDK 25 class files,
       # so disable it for this job — coverage isn't needed for these tests.
       - name: Run fork unit tests
         run: >
           mvn -B -ntp -DskipTests=false
-          -Dtest='AsciidoctorConfigLoaderTest,ExecutableResolverTest,ProjectConfigDiscoveryTest'
+          -Dtest='AsciidoctorConfigLoaderTest,ExecutableResolverTest,ProjectConfigDiscoveryTest,PreviewSourceResolverTest'
           -DfailIfNoTests=true
           -Djacoco.skip=true
           test

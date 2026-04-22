@@ -1,8 +1,17 @@
 #!/bin/bash
+# scripts/internal/download_javafx_jars.sh
+#
+# Downloads the JavaFX 25 SDK runtime jars (lib/) for all *nix targets into
+# <repo>/jmods/{linux-jars,mac-jars,mac-m1-jars,windows-jars}/.
+#
+# Prefer invoking via `scripts/setup.sh` rather than running this directly.
 
 set -e
 
 VERSION=25
+script_dir="$(cd "$(dirname "$0")" && pwd)"
+repo_root="$(cd "$script_dir/../.." && pwd)"
+cd "$repo_root"
 
 # jmods/mac-m1-jars
 rm -rf jmods/mac-m1-jars

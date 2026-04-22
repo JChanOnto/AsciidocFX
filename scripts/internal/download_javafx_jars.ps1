@@ -1,15 +1,17 @@
-# Downloads the JavaFX 25 SDK for Windows into jmods\windows-jars\.
+# scripts/internal/download_javafx_jars.ps1
+#
+# Downloads the JavaFX 25 SDK for Windows into <repo>/jmods/windows-jars/.
 # Required by the `local-run` Maven profile on Windows.
 #
 # The SDK keeps its native lib/+bin/ layout because Windows needs the
 # bin/ DLLs on PATH for the JavaFX QuantumRenderer to start.
 #
-# Usage (PowerShell, repo root):
-#   .\download_javafx_jars.ps1
+# Prefer invoking via `scripts\setup.ps1` rather than running this directly.
 #
 $ErrorActionPreference = 'Stop'
 $Version = '25'
-$Root    = $PSScriptRoot
+# This script lives at <repo>/scripts/internal/; repo root is two levels up.
+$Root    = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $JmodDir = Join-Path $Root 'jmods'
 $Out     = Join-Path $JmodDir 'windows-jars'
 $Tmp     = Join-Path $JmodDir 'windows-jars-tmp'

@@ -24,6 +24,8 @@ casual editing, but breaks down for projects that:
   PDF, EPUB, DocBook, Reveal.js) for crisp rendering
 - Want a **preview pane that matches the actual PDF output** (theme,
   fonts, pagination) instead of a CSS approximation
+- Want **fast PDF export** without giving up the zero-install promise
+  (this fork can ship a portable CRuby in the install4j package)
 
 Out of the box, AsciidocFX would ignore all of these unless the user manually
 copied them into `~/.AsciidocFX-<version>/asciidoctor_pdf.json` etc. — and
@@ -115,6 +117,39 @@ debounce — even chapter renders are too heavy for live-typing feedback.
 **Switching back to HTML preview**: set `previewBackend` to `HTML` in
 `Settings → Preview Settings`. The right pane swaps live, no restart.
 
+### 4. Optional native-Ruby PDF render path (2-5× faster)
+
+The default JRuby `asciidoctorj-pdf` pipeline is portable but slow on
+big books — Prawn-on-the-JVM has measurable per-page overhead. This
+fork adds an optional shell-out to a CRuby `asciidoctor-pdf`, used by
+both the live preview *and* `Save → PDF`. Two ways in:
+
+- **Bundled with the install4j package** *(zero user setup)*. Run
+  `scripts\build.ps1 -WithRuby` (Windows) or
+  `scripts/build.sh --with-ruby` (macOS/Linux) — these wrappers invoke
+  the underlying [`scripts/internal/bundle_ruby_runtime.ps1`](scripts/internal/bundle_ruby_runtime.ps1)
+  / [`bundle_ruby_runtime.sh`](scripts/internal/bundle_ruby_runtime.sh)
+  before the Maven package phase. The script downloads a portable
+  CRuby + vendors `asciidoctor-pdf`, `asciidoctor-diagram`, `rouge`,
+  and `prawn-svg` into `ruby-runtime/<os>/`. The package phase copies
+  that tree into `target/appassembler/ruby/`. At runtime
+  `BundledRubyResolver` auto-detects `<install-dir>/ruby/bin/asciidoctor-pdf`
+  and uses it transparently. End users get the fast path with no extra
+  install. Adds ~40 MB to the package.
+
+- **User setting `pdfRendererCommand`** *(power users)*. Set in
+  `Settings → PDF Settings`. Examples:
+  `bundle exec asciidoctor-pdf` /
+  `asciidoctor-pdf` /
+  `C:\Ruby34-x64\bin\bundle.bat exec asciidoctor-pdf`.
+  When set, this overrides the bundled runtime.
+
+If neither is present, AsciidocFX falls back to the in-process JRuby
+path (upstream behavior). Every attribute the JRuby path would have
+applied is forwarded as a `-a name=value` flag, so theme,
+diagram-cache dir, and `.asciidoctorconfig`-resolved settings carry
+over identically.
+
 ## Project configuration with `.asciidoctorconfig`
 
 Drop a `.asciidoctorconfig` file in your project root to set
@@ -176,173 +211,115 @@ skip the walker and load only what you specify. The conventional
 4. `.asciidoctorconfig` (innermost first)
 5. Built-in defaults
 
-## Setup — prerequisites for building
+## Setup
 
-You need the following installed and on `PATH` before you can build or run
-this project. Versions listed are what the build is currently known to work
-with; newer point releases are usually fine.
+The one-shot setup script handles everything: detects what's already
+installed, installs missing prerequisites via the platform package
+manager, and downloads the JavaFX SDK into `jmods/<os>-jars/` (gitignored).
+Idempotent — safe to re-run.
 
-### Required
+```powershell
+# Windows
+.\scripts\setup.ps1                # required prereqs + JavaFX SDK
+.\scripts\setup.ps1 -WithRuby      # + bundled CRuby for native PDF path
+.\scripts\setup.ps1 -SkipPrereqs   # skip dep checks (CI on prebuilt image)
+```
 
-| Tool                          | Version | Purpose                                                    |
-| ----------------------------- | ------- | ---------------------------------------------------------- |
-| **JDK**                       | 25 LTS  | Build + runtime. Eclipse Temurin recommended. The pom pins `<java.version>25</java.version>` — older JDKs will fail with `release version 25 not supported`. |
-| **Apache Maven**              | 3.9+    | Build tool. `mvn` must be on `PATH`.                       |
-| **Git**                       | any     | Source control + cloning JavaFX jmods on first build.      |
+```bash
+# macOS / Linux
+./scripts/setup.sh                  # required prereqs + JavaFX SDK
+./scripts/setup.sh --with-ruby      # + bundled CRuby for native PDF path
+./scripts/setup.sh --skip-prereqs   # skip dep checks (CI on prebuilt image)
+```
 
-### Required for diagram rendering at export time
+What it installs / verifies:
 
-| Tool                          | Version  | Purpose                                                  |
-| ----------------------------- | -------- | -------------------------------------------------------- |
-| **Node.js + npm**             | 18+      | Hosts `mmdc` (Mermaid CLI).                              |
-| **`@mermaid-js/mermaid-cli`** | latest   | `asciidoctor-diagram` shells out to `mmdc` for PDF/EPUB. |
-| **Graphviz** (`dot`)          | any      | Required by PlantUML diagrams. Set `GRAPHVIZ_DOT` env.   |
+| Tool                          | Version | How it's installed                                       |
+| ----------------------------- | ------- | -------------------------------------------------------- |
+| **JDK**                       | 25 LTS  | winget `EclipseAdoptium.Temurin.25.JDK` / brew `temurin@25` / *(Linux: manual — see warning)* |
+| **Apache Maven**              | 3.9+    | winget `Apache.Maven` / brew / apt                       |
+| **Git**                       | any     | winget `Git.Git` / brew / apt                            |
+| **Node.js + npm**             | LTS     | winget `OpenJS.NodeJS.LTS` / brew / apt                  |
+| **`@mermaid-js/mermaid-cli`** | latest  | `npm install -g @mermaid-js/mermaid-cli`                 |
+| **Graphviz** (`dot`)          | any     | winget `Graphviz.Graphviz` / brew / apt; sets `GRAPHVIZ_DOT` |
+| **JavaFX 25 SDK**             | 25      | downloaded into `jmods/<os>-jars/` (gitignored)          |
 
-### Optional
+With `-WithRuby` / `--with-ruby` it additionally installs **7-Zip**
+(Windows) or **ruby-build** (macOS/Linux) and bundles a portable CRuby
+into `ruby-runtime/<os>/` — see [Bundling a CRuby runtime](#bundling-a-cruby-runtime-optional).
+
+### Optional extras
 
 | Tool                | Purpose                                                              |
 | ------------------- | -------------------------------------------------------------------- |
 | **Chromium/Chrome** | Some `mmdc` versions require a system browser for SVG rasterization. |
-| **MS Core Fonts**   | Linux only — fixes `####` glyphs in PDF output.                      |
+| **MS Core Fonts**   | Linux only — fixes `####` glyphs in PDF output (`apt install ttf-mscorefonts-installer`). |
 | **KindleGen**       | Mobi (`.mobi`) export only.                                          |
 
-### Install — Windows (PowerShell)
+### After installation
 
-Apache Maven is not published on winget, so the Windows instructions use a
-mix of winget (for everything else) and either Scoop or a manual Maven
-install. Pick **one** Maven option.
+Open a **new** terminal so `PATH` and `JAVA_HOME` from any newly-installed
+tools become visible. Verify:
 
-```powershell
-# JDK 25 + Node + Graphviz via winget
-winget install --id EclipseAdoptium.Temurin.25.JDK
-winget install --id OpenJS.NodeJS.LTS
-winget install --id Graphviz.Graphviz
-
-# --- Maven: pick ONE of the following ---
-
-# Option A: Scoop (recommended, no admin required)
-#   If you don't have Scoop: https://scoop.sh
-scoop install main/maven
-
-# Option B: Chocolatey (requires admin)
-choco install maven -y
-
-# Option C: Manual
-#   Download apache-maven-3.9.x-bin.zip from https://maven.apache.org/download.cgi
-#   Extract to e.g. C:\Tools\apache-maven-3.9.x
-#   Add C:\Tools\apache-maven-3.9.x\bin to PATH
-#   setx M2_HOME "C:\Tools\apache-maven-3.9.x"
-
-# Mermaid CLI
-npm install -g @mermaid-js/mermaid-cli
-
-# Verify
-java -version
-mvn -version
+```
+java -version       # 25.x.x
+mvn -version        # 3.9+ on JDK 25
 node --version
 mmdc --version
 dot -V
 ```
 
-### Install — macOS (Homebrew)
+### Linux: JDK 25 caveat
 
-```bash
-brew install --cask temurin@25
-brew install maven node graphviz
-npm install -g @mermaid-js/mermaid-cli
-```
-
-### Install — Linux (Debian/Ubuntu)
-
-```bash
-# Debian/Ubuntu currently package OpenJDK 21 as the newest stable; for JDK 25
-# install Eclipse Temurin from https://adoptium.net/installation/linux/ or use
-# SDKMAN (`sdk install java 25-tem`).
-sudo apt-get update
-sudo apt-get install -y maven nodejs npm graphviz ttf-mscorefonts-installer
-sudo npm install -g @mermaid-js/mermaid-cli
-```
-
-### Environment variables
-
-```powershell
-# Windows — the exact JDK folder name includes the patch version, so resolve
-# it dynamically. Run in a NEW terminal afterwards so PATH/JAVA_HOME refresh.
-$jdk = (Get-ChildItem 'C:\Program Files\Eclipse Adoptium' -Directory |
-        Where-Object Name -Like 'jdk-25*' | Select-Object -First 1).FullName
-
-# JAVA_HOME is short, so setx is fine here.
-setx JAVA_HOME $jdk
-setx GRAPHVIZ_DOT "C:\Program Files\Graphviz\bin\dot.exe"
-
-# DO NOT use `setx PATH ...` — it silently truncates the User PATH to 1024
-# chars (and rewrites it as REG_SZ, losing %VAR% expansion). Instead, append
-# new entries to the User PATH directly via the registry:
-function Add-UserPath([string]$Entry) {
-    $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
-    $cur = [string]$key.GetValue('Path', '', 'DoNotExpandEnvironmentNames')
-    $parts = @($cur -split ';' | Where-Object { $_ })
-    if ($parts -notcontains $Entry) {
-        $parts += $Entry
-        $new = ($parts -join ';')
-        # ExpandString lets you use %JAVA_HOME%, %USERPROFILE%, etc.
-        $key.SetValue('Path', $new, [Microsoft.Win32.RegistryValueKind]::ExpandString)
-    }
-    $key.Close()
-}
-Add-UserPath '%JAVA_HOME%\bin'
-# Also add Graphviz to PATH if `dot` is not found:
-#   Add-UserPath 'C:\Program Files\Graphviz\bin'
-```
-
-```bash
-# macOS / Linux (add to ~/.zshrc or ~/.bashrc)
-export JAVA_HOME="$(/usr/libexec/java_home -v 25)"   # macOS
-export JAVA_HOME=/usr/lib/jvm/temurin-25-jdk-amd64   # Linux (Temurin .deb)
-export PATH="$JAVA_HOME/bin:$PATH"
-export GRAPHVIZ_DOT="$(which dot)"
-```
-
-### One-time: download the JavaFX SDK for your platform
-
-Maven needs the JavaFX runtime jars **and** native libraries on the module
-path / PATH to launch a JavaFX app. The repo ships only the link-time
-`.jmod` files under `jmods/<os>/`; the runtime SDK is downloaded once into
-`jmods/<os>-jars/` (gitignored). Pick the script for your OS:
-
-```powershell
-# Windows
-.\download_javafx_jars.ps1
-```
-
-```bash
-# macOS / Linux (downloads SDKs for all *nix targets)
-bash download_javafx_jars.sh
-```
-
-The resulting layout is:
-
-| Platform        | Extracted to                                |
-| --------------- | ------------------------------------------- |
-| Windows x64     | `jmods/windows-jars/{lib,bin}/`             |
-| macOS x86_64    | `jmods/mac-jars/`                           |
-| macOS aarch64   | `jmods/mac-m1-jars/`                        |
-| Linux x64       | `jmods/linux-jars/`                         |
+Debian/Ubuntu apt does not ship JDK 25 yet. The setup script will install
+everything else and print a warning; install Temurin 25 from
+<https://adoptium.net/installation/linux/> or via SDKMAN
+(`sdk install java 25-tem`) and re-run setup.
 
 The pom auto-detects your OS and points `--module-path` at the right
-folder. No manual flags needed.
+`jmods/<os>-jars/` folder. No manual flags needed.
 
 ## Building
 
 A plain `mvn package` only produces `target/AsciidocFX.jar`. To get a runnable
-launcher script (and a portable zip distribution), build with the
-`install4j-package` profile:
+launcher script (and a portable zip distribution), use the build wrapper —
+it runs setup if needed, then invokes the `install4j-package` Maven profile:
 
 ```powershell
-# Compile + package into target/appassembler/ (launcher + conf + lib)
-# Also produces target/asciidocfx-<version>.zip
+# Windows
+.\scripts\build.ps1                 # standard package
+.\scripts\build.ps1 -WithRuby       # + bundle portable CRuby into install
+```
+
+```bash
+# macOS / Linux
+./scripts/build.sh                  # standard package
+./scripts/build.sh --with-ruby      # + bundle portable CRuby into install
+```
+
+Under the hood this is just:
+
+```
 mvn -P install4j-package clean package -DskipTests
 ```
+
+so you can always invoke Maven directly if you prefer. Pass extra args after
+`--`, e.g. `.\scripts\build.ps1 -- -DskipTests=false`.
+
+### Bundling a CRuby runtime *(optional)*
+
+If `ruby-runtime/<os>/` exists at package time, its contents are copied
+into `target/appassembler/ruby/` and the resulting AsciidocFX install
+will use that bundled CRuby for PDF render — no separate Ruby install
+required from end users. The build still succeeds without it; the app
+just falls back to the in-process JRuby renderer.
+
+The `-WithRuby` / `--with-ruby` flag on `build`/`setup` triggers the bundle
+step. It requires **7-Zip on PATH** (Windows) or **ruby-build on PATH**
+(macOS/Linux). The underlying scripts in [`scripts/internal/`](scripts/internal/)
+are idempotent (skip if `ruby-runtime/<os>/` is already populated) and pin
+both the Ruby version and gem versions for reproducibility — edit the script
+headers to bump versions.
 
 After a successful build:
 
@@ -358,28 +335,25 @@ After a successful build:
 
 ### Run it
 
-The simplest path that works on every platform:
+Use the run wrapper — it ensures setup, fixes up `PATH` /
+`LD_LIBRARY_PATH` so the JavaFX native libs load, and starts the app via
+the `local-run` Maven profile:
 
 ```powershell
-# Windows — JavaFX native DLLs must be on PATH for QuantumRenderer to start
-$env:Path = "$PWD\jmods\windows-jars\bin;$env:Path"
-mvn -P local-run spring-boot:run
+# Windows
+.\scripts\run.ps1
 ```
 
 ```bash
-# macOS — JavaFX dylibs are loaded from the SDK lib/ folder automatically
-mvn -P local-run spring-boot:run
+# macOS / Linux
+./scripts/run.sh
 ```
 
-```bash
-# Linux — same as macOS; if libs aren't picked up, add them to LD_LIBRARY_PATH:
-export LD_LIBRARY_PATH="$PWD/jmods/linux-jars:$LD_LIBRARY_PATH"
-mvn -P local-run spring-boot:run
-```
-
-The `local-run` profile uses Spring Boot's exec plugin and auto-resolves
-`--module-path` per OS, so no `-Djavafx.module.path=...` is required unless
-you keep the SDK somewhere non-default.
+Under the hood this is `mvn -P local-run spring-boot:run` with `PATH`
+(Windows) / `LD_LIBRARY_PATH` (Linux) prepended with
+`jmods/<os>-jars/[bin]`. The profile auto-resolves `--module-path` per OS,
+so no `-Djavafx.module.path=...` is required unless you keep the SDK
+somewhere non-default.
 
 ### Run the packaged launcher
 
@@ -407,6 +381,7 @@ conflicts in:
 - `src/main/java/com/kodedu/service/AsciidoctorFactory.java`
 - `src/main/java/com/kodedu/config/AsciidoctorConfigBase.java`
 - `src/main/java/com/kodedu/config/PreviewConfigBean.java`
+- `src/main/java/com/kodedu/config/PdfConfigBean.java`
 - `src/main/java/com/kodedu/controller/ApplicationController.java`
 - `src/main/java/com/kodedu/boot/AppStarter.java`
 - `src/main/java/com/kodedu/service/convert/pdf/AsciidoctorPdfBookConverter.java`
@@ -415,10 +390,12 @@ conflicts in:
 - `conf/public/mermaid.html`
 - `conf/public/js/prototypes.js`
 - `conf/public/js/asciidoctor-block-extensions.js`
+- `pom.xml` (install4j-package profile bundles `ruby-runtime/<os>/`)
 
 The new `ProjectConfigDiscovery.java`, `PdfPreviewPane.java`,
-`PdfRenderer.java`, `PreviewSourceResolver.java`, and `PreviewBackend.java`
-are self-contained additions with no upstream conflict surface.
+`PdfRenderer.java`, `PreviewSourceResolver.java`, `PreviewBackend.java`,
+and `BundledRubyResolver.java` are self-contained additions with no
+upstream conflict surface.
 
 ## License
 

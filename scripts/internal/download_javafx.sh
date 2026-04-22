@@ -1,8 +1,19 @@
 #!/bin/bash
+# scripts/internal/download_javafx.sh
+#
+# Downloads the JavaFX 25 SDK runtime jars (lib/) AND the link-time .jmod
+# files for all four targets into <repo>/jmods/. The .jmod variant is what
+# the install4j-package profile bundles into the launcher.
+#
+# Prefer invoking via `scripts/setup.sh --full` rather than running this
+# directly.
 
 set -e
 
 VERSION=25
+script_dir="$(cd "$(dirname "$0")" && pwd)"
+repo_root="$(cd "$script_dir/../.." && pwd)"
+cd "$repo_root"
 
 # jmods/mac-m1-jars
 rm -rf jmods/mac-m1-jars

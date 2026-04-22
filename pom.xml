@@ -634,6 +634,38 @@
                                     <target>
                                         <echo message="${project.build.directory}"/>
                                         <mkdir dir="${project.build.directory}"/>
+
+                                        <!--
+                                            Bundle a portable CRuby + asciidoctor-pdf into the
+                                            appassembler tree if `ruby-runtime/<os>/` exists.
+                                            See scripts/internal/bundle_ruby_runtime.{ps1,sh}
+                                            (run via `scripts/build.{ps1,sh}` with the with-ruby flag). When present,
+                                            PdfRenderer auto-detects it via DiscoverBundledRuby
+                                            and uses the fast native-Ruby render path; absent,
+                                            AsciidocFX falls back to in-process JRuby.
+                                        -->
+                                        <condition property="afx.ruby.os" value="windows">
+                                            <os family="windows"/>
+                                        </condition>
+                                        <condition property="afx.ruby.os" value="mac">
+                                            <os family="mac"/>
+                                        </condition>
+                                        <condition property="afx.ruby.os" value="linux">
+                                            <and>
+                                                <os family="unix"/>
+                                                <not><os family="mac"/></not>
+                                            </and>
+                                        </condition>
+                                        <available file="${project.basedir}/ruby-runtime/${afx.ruby.os}"
+                                                   type="dir"
+                                                   property="afx.ruby.bundled"/>
+                                        <copy todir="${project.build.directory}/appassembler/ruby"
+                                              failonerror="false">
+                                            <fileset dir="${project.basedir}/ruby-runtime/${afx.ruby.os}"
+                                                     erroronmissingdir="false"/>
+                                        </copy>
+                                        <echo>Bundled Ruby runtime present: ${afx.ruby.bundled}</echo>
+
                                         <zip destfile="${project.build.directory}/asciidocfx-${project.version}.zip"
                                              basedir="${project.build.directory}/appassembler/">
                                         </zip>

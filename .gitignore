@@ -54,6 +54,9 @@ jmods/mac-jars/
 jmods/linux-jars/
 jmods/windows-jars/
 
+# Bundled CRuby runtime produced by scripts/internal/bundle_ruby_runtime.{ps1,sh}
+ruby-runtime/
+
 jars/
 
 cert/

@@ -1,0 +1,160 @@
+# .github/workflows/release.yml
+#
+# Build portable AsciidocFX zips on Windows / macOS / Linux using the
+# scripts/build.{ps1,sh} entry points (i.e. the same path a developer would
+# take locally), bundle a portable CRuby runtime into each, and attach the
+# resulting zips to a GitHub Release.
+#
+# Triggers:
+#   * push of a tag matching v*  -> builds + creates a draft release for that tag
+#   * workflow_dispatch          -> manual trigger; enter the tag name in the UI
+#
+# This workflow does NOT require an install4j license or code-signing
+# certificates — it only produces the portable zip artifact, not native
+# installers. The existing .github/workflows/maven.yml continues to handle
+# the signed install4j-built installers (.dmg/.exe/.deb/.rpm).
+
+name: Release (portable zips from scripts/build)
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (e.g. v2.0.0). Created if it doesn't exist."
+        required: true
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write   # needed by softprops/action-gh-release to create the release
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            label: windows
+            shell: pwsh
+            build_cmd: ./scripts/build.ps1 -SkipSetup -WithRuby
+            setup_cmd: pwsh -NoProfile -File scripts/setup.ps1 -SkipPrereqs -WithRuby
+          - os: macos-latest
+            label: mac
+            shell: bash
+            build_cmd: ./scripts/build.sh --skip-setup --with-ruby
+            setup_cmd: ./scripts/setup.sh --skip-prereqs --with-ruby
+          - os: ubuntu-latest
+            label: linux
+            shell: bash
+            build_cmd: ./scripts/build.sh --skip-setup --with-ruby
+            setup_cmd: ./scripts/setup.sh --skip-prereqs --with-ruby
+
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: ${{ matrix.shell }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 25
+        uses: actions/setup-java@v4
+        with:
+          java-version: '25'
+          distribution: 'temurin'
+          cache: maven
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 'lts/*'
+
+      - name: Install Mermaid CLI + Graphviz (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y graphviz
+          npm install -g @mermaid-js/mermaid-cli
+
+      - name: Install Mermaid CLI + Graphviz (macOS)
+        if: matrix.os == 'macos-latest'
+        run: |
+          brew install graphviz
+          npm install -g @mermaid-js/mermaid-cli
+
+      - name: Install Mermaid CLI + Graphviz + 7-Zip (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          choco install graphviz 7zip --no-progress -y
+          npm install -g '@mermaid-js/mermaid-cli'
+
+      # Run setup with --skip-prereqs / -SkipPrereqs to avoid re-installing the
+      # toolchain (already provided above by setup-java / setup-node / brew /
+      # apt / choco). This step downloads the JavaFX SDK and bundles a portable
+      # CRuby runtime into ruby-runtime/<os>/ so the install4j-package profile
+      # picks it up and ships the fast native-Ruby PDF render path.
+      - name: Download JavaFX SDK + bundle CRuby runtime
+        shell: bash
+        run: ${{ matrix.setup_cmd }}
+
+      - name: Build portable zip (with bundled Ruby)
+        run: ${{ matrix.build_cmd }}
+
+      - name: Stage release artifact
+        shell: bash
+        run: |
+          mkdir -p staging
+          # Rename per-OS so artifacts don't collide in the release.
+          for f in target/asciidocfx-*.zip; do
+            base="$(basename "$f" .zip)"
+            cp "$f" "staging/${base}-${{ matrix.label }}.zip"
+          done
+          ls -l staging
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: asciidocfx-${{ matrix.label }}
+          path: staging/*.zip
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Extract release notes from CHANGELOG.md
+        run: |
+          awk '/^## /{a+=1} {if(a>1)exit} {if(a==1){print}}' CHANGELOG.md > RELEASE_NOTES.md
+          echo "" >> RELEASE_NOTES.md
+          echo "## SHA-256" >> RELEASE_NOTES.md
+          echo "| File | SHA-256 |" >> RELEASE_NOTES.md
+          echo "| --- | --- |" >> RELEASE_NOTES.md
+          (cd dist && sha256sum *.zip) | awk '{print "| "$2" | "$1" |"}' >> RELEASE_NOTES.md
+
+      - name: Resolve tag name
+        id: tag
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "name=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.name }}
+          name: ${{ steps.tag.outputs.name }}
+          body_path: RELEASE_NOTES.md
+          draft: true
+          prerelease: false
+          fail_on_unmatched_files: true
+          files: dist/*.zip
