@@ -23,6 +23,8 @@ import org.springframework.util.DigestUtils;
 
 import java.awt.*;
 import java.awt.image.BufferedImage;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Map;
 import java.util.Objects;
@@ -58,6 +60,7 @@ public class MermaidServiceImpl implements MermaidService {
         Objects.requireNonNull(imageTarget);
 
         boolean cachedResource = imageTarget.contains("/afx/cache");
+        boolean svgOutput = imageTarget.endsWith(".svg");
 
         if (rerender) {
             String md5 = cachedResource ? imageTarget : DigestUtils.md5DigestAsHex(mermaidContent.getBytes());
@@ -68,7 +71,7 @@ public class MermaidServiceImpl implements MermaidService {
             }
         }
 
-        if (!imageTarget.endsWith(".png") && !cachedResource) {
+        if (!imageTarget.endsWith(".png") && !imageTarget.endsWith(".svg") && !cachedResource) {
             return;
         }
 
@@ -103,30 +106,63 @@ public class MermaidServiceImpl implements MermaidService {
                         window.setMember("webview", webView);
                         window.call("renderMermaid", mermaidContent);
                     } else if ("RENDERED".equals(data)) {
-                        WritableImage writableImage = webView.snapshot(new SnapshotParameters(), null);
-                        BufferedImage bufferedImage = SwingFXUtils.fromFXImage(writableImage, null);
-                        threadService.runActionLater(() -> {
-                            controller.getRootAnchor().getChildren().remove(webView);
-                        });
 
-                        threadService.runTaskLater(() -> {
-                            TrimWhite trimWhite = new TrimWhite();
-                            BufferedImage trimmed = trimWhite.trim(bufferedImage);
-                            if (isImageEmpty(trimmed)) {
-                                createMermaidDiagram(mermaidContent, type, imagesDir, imageTarget, nodename, true);
-                                return;
-                            }
+                        if (svgOutput) {
+                            // SVG path: extract SVG string directly from the WebView
+                            String svgContent = (String) webView.getEngine().executeScript("getSvgContent()");
+                            threadService.runActionLater(() -> {
+                                controller.getRootAnchor().getChildren().remove(webView);
+                            });
 
-                            if (!cachedResource) {
-                                Path treePath = path.resolve(imageTarget);
-                                IOHelper.createDirectories(path.resolve(imagesDir));
-                                IOHelper.imageWrite(trimmed, "png", treePath.toFile());
-                            } else {
-                                binaryCacheService.putBinary(imageTarget, trimmed);
-                            }
+                            threadService.runTaskLater(() -> {
+                                if (Objects.isNull(svgContent) || svgContent.isEmpty()) {
+                                    createMermaidDiagram(mermaidContent, type, imagesDir, imageTarget, nodename, true);
+                                    return;
+                                }
 
-                            current.getCache().put(imageTarget, hashCode);
-                        });
+                                if (!cachedResource) {
+                                    Path treePath = path.resolve(imageTarget);
+                                    IOHelper.createDirectories(path.resolve(imagesDir));
+                                    try {
+                                        Files.writeString(treePath, svgContent, StandardCharsets.UTF_8);
+                                    } catch (Exception e) {
+                                        logger.error("Failed to write SVG file: {}", treePath, e);
+                                    }
+                                } else {
+                                    binaryCacheService.putBinary(imageTarget,
+                                            svgContent.getBytes(StandardCharsets.UTF_8));
+                                }
+
+                                current.getCache().put(imageTarget, hashCode);
+                            });
+
+                        } else {
+                            // PNG path: screenshot the WebView (original behavior)
+                            WritableImage writableImage = webView.snapshot(new SnapshotParameters(), null);
+                            BufferedImage bufferedImage = SwingFXUtils.fromFXImage(writableImage, null);
+                            threadService.runActionLater(() -> {
+                                controller.getRootAnchor().getChildren().remove(webView);
+                            });
+
+                            threadService.runTaskLater(() -> {
+                                TrimWhite trimWhite = new TrimWhite();
+                                BufferedImage trimmed = trimWhite.trim(bufferedImage);
+                                if (isImageEmpty(trimmed)) {
+                                    createMermaidDiagram(mermaidContent, type, imagesDir, imageTarget, nodename, true);
+                                    return;
+                                }
+
+                                if (!cachedResource) {
+                                    Path treePath = path.resolve(imageTarget);
+                                    IOHelper.createDirectories(path.resolve(imagesDir));
+                                    IOHelper.imageWrite(trimmed, "png", treePath.toFile());
+                                } else {
+                                    binaryCacheService.putBinary(imageTarget, trimmed);
+                                }
+
+                                current.getCache().put(imageTarget, hashCode);
+                            });
+                        }
 
                     } else {
                         logger.error(data);

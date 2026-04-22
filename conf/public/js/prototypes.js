@@ -1,7 +1,7 @@
-function cachedImageUri(content) {
+function cachedImageUri(content, format) {
     var md5 = CryptoJS.MD5(content);
-
-    return "/afx/cache/" + md5 + ".png";
+    var ext = (format && format.toLowerCase() === "svg") ? ".svg" : ".png";
+    return "/afx/cache/" + md5 + ext;
 };
 
 function lineNumber(ifExist) {

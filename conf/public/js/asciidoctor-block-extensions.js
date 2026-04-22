@@ -35,10 +35,13 @@ function process_block_extension(obj) {
     var command = normalName;
     var content = reader.$read();
 
+    // For mermaid diagrams, prefer SVG for sharper rendering
+    var cacheFormat = (normalName === "mermaid") ? "svg" : "png";
+
     if (filename != "") {
         target = parent.$image_uri(filename);
     } else {
-        target = cachedImageUri(content);
+        target = cachedImageUri(content, cacheFormat);
         var host = ((typeof location) != "undefined") ? "http://" + location.host : "";
         filename = host + target;
     }

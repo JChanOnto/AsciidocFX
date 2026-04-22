@@ -62,18 +62,36 @@ public class AsciidoctorFactory {
             return;
         }
         Path workingDir = directoryService.workingDirectory();
+
+        // 1) Collect extensions from the conventional .asciidoctor/lib directory
+        List<Path> extensions = new ArrayList<>();
         Path libDir = workingDir.resolve(".asciidoctor/lib");
-        if (Files.notExists(libDir)) {
+        if (Files.exists(libDir)) {
+            extensions.addAll(IOHelper.walk(libDir, 2)
+                    .filter(p -> p.toString().endsWith(".rb") || p.toString().endsWith(".jar"))
+                    .sorted().toList());
+        }
+
+        // 2) Auto-discover Asciidoctor Ruby extensions elsewhere in the project
+        //    (validated by content — must reference Asciidoctor::Extensions).
+        //    Skip files already found in .asciidoctor/lib to avoid duplicates.
+        Set<String> alreadyLoaded = extensions.stream()
+                .map(p -> p.getFileName().toString())
+                .collect(java.util.stream.Collectors.toSet());
+        List<Path> discovered = ProjectConfigDiscovery.discoverRubyExtensions(workingDir);
+        for (Path ext : discovered) {
+            if (!alreadyLoaded.contains(ext.getFileName().toString())) {
+                extensions.add(ext);
+            }
+        }
+
+        if (extensions.isEmpty()) {
             UserExtension userExtension = userExtensionMap.get(doctor);
             if (Objects.nonNull(userExtension)) {
                 userExtension.registerExtensions(doctor, new ArrayList<>());
             }
             return;
         }
-
-        List<Path> extensions = IOHelper.walk(libDir, 2)
-                .filter(p -> p.toString().endsWith(".rb") || p.toString().endsWith(".jar"))
-                .sorted().toList();
 
         UserExtension userExtension = userExtensionMap.compute(doctor, (adoc, uEx) -> {
             if (Objects.nonNull(uEx)) {

@@ -11,6 +11,7 @@ import com.kodedu.config.factory.TableFactory;
 import com.kodedu.controller.ApplicationController;
 import com.kodedu.helper.IOHelper;
 import com.kodedu.other.JsonHelper;
+import com.kodedu.service.ProjectConfigDiscovery;
 import com.kodedu.service.ThreadService;
 import jakarta.json.*;
 import javafx.beans.property.*;
@@ -328,10 +329,14 @@ public abstract class AsciidoctorConfigBase<T extends LoadedAttributes> extends 
                 .attributes(Attributes.builder().allowUriRead(true).attribute(DOC_FILE_ATTR, pathText).build()).build());
         Map<String, Object> defaultAttributes = document.getAttributes();
 
-        return getAsciiDocAttributes(defaultAttributes);
+        return getAsciiDocAttributes(defaultAttributes, currentTab.getParentOrWorkdir());
     }
 
     public Attributes getAsciiDocAttributes(Map<String, Object> originalDocAttributes) {
+        return getAsciiDocAttributes(originalDocAttributes, null);
+    }
+
+    public Attributes getAsciiDocAttributes(Map<String, Object> originalDocAttributes, Path workingDir) {
         Map<String, String> map = new LinkedHashMap<>();
         ObservableList<AttributesTable> attributes = getAttributes();
         for (AttributesTable attribute : attributes) {
@@ -357,10 +362,43 @@ public abstract class AsciidoctorConfigBase<T extends LoadedAttributes> extends 
         }
 
         String docdir = (String) originalDocAttributes.get("docdir");
-        cloneMap = resolveExtensionBuilderAttributes(docdir, cloneMap);
+        Map<String, Object> resolvedMap = resolveExtensionBuilderAttributes(docdir, cloneMap);
+
+        // Auto-discover project-level PDF theme and Mermaid config when not
+        // explicitly set in the document or the config UI.
+        // Prefer the working directory (project root) over docdir, since docdir
+        // may point to a subdirectory (e.g. sections/) for included files.
+        Path discoverRoot = Objects.nonNull(workingDir) ? workingDir
+                : (Objects.nonNull(docdir) ? Paths.get(docdir) : null);
+        if (Objects.nonNull(discoverRoot) && Files.isDirectory(discoverRoot)) {
+            if (!resolvedMap.containsKey("pdf-theme") || !resolvedMap.containsKey("pdf-themesdir")) {
+                ProjectConfigDiscovery.discoverPdfTheme(discoverRoot).ifPresent(theme -> {
+                    if (!resolvedMap.containsKey("pdf-theme")) {
+                        resolvedMap.put("pdf-theme", theme.themeName());
+                        logger.info("Auto-discovered pdf-theme: {}", theme.themeName());
+                    }
+                    if (!resolvedMap.containsKey("pdf-themesdir")) {
+                        resolvedMap.put("pdf-themesdir", theme.themesDir().toString());
+                        logger.info("Auto-discovered pdf-themesdir: {}", theme.themesDir());
+                    }
+                });
+            }
+            if (!resolvedMap.containsKey("mermaid-config")) {
+                ProjectConfigDiscovery.discoverMermaidConfig(discoverRoot).ifPresent(mermaidPath -> {
+                    resolvedMap.put("mermaid-config", mermaidPath.toString());
+                    logger.info("Auto-discovered mermaid-config: {}", mermaidPath);
+                });
+            }
+            // Default mermaid output to SVG for all backends (asciidoctor-diagram).
+            // SVG yields sharper diagrams and is supported by HTML, PDF (prawn-svg), EPUB, etc.
+            if (!resolvedMap.containsKey("mermaid-format")) {
+                resolvedMap.put("mermaid-format", "svg");
+                logger.info("Auto-set mermaid-format: svg");
+            }
+        }
 
         AttributesBuilder attributesBuilder = Attributes.builder();
-        for (Map.Entry<String, Object> entry : cloneMap.entrySet()) {
+        for (Map.Entry<String, Object> entry : resolvedMap.entrySet()) {
             attributesBuilder.attribute(entry.getKey(), entry.getValue());
         }
 

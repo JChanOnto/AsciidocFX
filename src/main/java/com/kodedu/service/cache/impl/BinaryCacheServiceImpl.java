@@ -111,7 +111,8 @@ public class BinaryCacheServiceImpl implements BinaryCacheService {
 
     private void saveInDisk(String key, byte[] bytes) {
         threadService.runActionLater(() -> {
-            Path tempFile = IOHelper.createTempFile(current.currentPath().get().getParent(), ".png");
+            String suffix = key.endsWith(".svg") ? ".svg" : ".png";
+            Path tempFile = IOHelper.createTempFile(current.currentPath().get().getParent(), suffix);
 
 //            System.out.println(tempFile.getParent());
             IOHelper.writeToFile(tempFile, bytes, StandardOpenOption.CREATE);
