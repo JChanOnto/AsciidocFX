@@ -781,7 +781,67 @@ public class ApplicationController extends TextWebSocketHandler implements Initi
         browserPro.setContextMenu(browserContextMenu);
 
         fileSystemView.setCellFactory(param -> {
-            TreeCell<Item> cell = new TextFieldTreeCell<Item>();
+            // Custom cell so we can paint a coloured "MASTER" badge on
+            // the row of whichever .adoc is currently driving the PDF
+            // preview.  Layout is:
+            //
+            //   [filename .................. MASTER]
+            //
+            // i.e. filename left-justified, badge pinned to the trailing
+            // edge via an HBox spacer.  We swap the cell into
+            // GRAPHIC_ONLY mode for master rows (text=null,
+            // graphic=HBox) and back to default mode for everything
+            // else, so non-master rows keep the stock TextFieldTreeCell
+            // behaviour (incl. inline rename).
+            TextFieldTreeCell<Item> cell = new TextFieldTreeCell<Item>() {
+                @Override
+                public void updateItem(Item item, boolean empty) {
+                    super.updateItem(item, empty);
+                    if (empty || item == null || item.getPath() == null) {
+                        setGraphic(null);
+                        setContentDisplay(javafx.scene.control.ContentDisplay.LEFT);
+                        return;
+                    }
+                    Path master = pdfPreviewPane.currentMasterProperty().get();
+                    boolean isMaster = false;
+                    if (master != null) {
+                        try {
+                            isMaster = item.getPath().toAbsolutePath().normalize()
+                                    .equals(master.toAbsolutePath().normalize());
+                        } catch (Exception ignored) {
+                            // Path normalisation can throw on weird URIs;
+                            // never let a tree cell crash the UI.
+                        }
+                    }
+                    if (!isMaster) {
+                        // Restore stock layout (left-aligned text, no graphic).
+                        setGraphic(null);
+                        setContentDisplay(javafx.scene.control.ContentDisplay.LEFT);
+                        return;
+                    }
+                    javafx.scene.control.Label name =
+                            new javafx.scene.control.Label(item.toString());
+                    javafx.scene.layout.Region spacer = new javafx.scene.layout.Region();
+                    javafx.scene.layout.HBox.setHgrow(spacer,
+                            javafx.scene.layout.Priority.ALWAYS);
+                    javafx.scene.control.Label badge =
+                            new javafx.scene.control.Label("MASTER");
+                    badge.setStyle(
+                            "-fx-background-color: #2e7d32;" +
+                            "-fx-text-fill: white;" +
+                            "-fx-font-size: 9px;" +
+                            "-fx-font-weight: bold;" +
+                            "-fx-padding: 1 5 1 5;" +
+                            "-fx-background-radius: 3;");
+                    javafx.scene.layout.HBox row =
+                            new javafx.scene.layout.HBox(6, name, spacer, badge);
+                    row.setAlignment(javafx.geometry.Pos.CENTER_LEFT);
+                    row.setMaxWidth(Double.MAX_VALUE);
+                    setText(null);
+                    setGraphic(row);
+                    setContentDisplay(javafx.scene.control.ContentDisplay.GRAPHIC_ONLY);
+                }
+            };
             cell.setOnDragDetected(event -> {
                 Dragboard db = cell.startDragAndDrop(TransferMode.ANY);
                 ClipboardContent content = new ClipboardContent();
@@ -790,6 +850,21 @@ public class ApplicationController extends TextWebSocketHandler implements Initi
                 current.currentWebView().requestFocus();
             });
             return cell;
+        });
+
+        // Repaint the file tree whenever the resolved master changes so
+        // the MASTER badge moves to the right row.
+        pdfPreviewPane.currentMasterProperty().addListener((obs, ov, nv) -> fileSystemView.refresh());
+
+        // Pre-resolve the master document on tab focus.  The BFS over the
+        // include graph is cheap (memoised per file by mtime/size in
+        // MasterDocResolver), and resolving here means the MASTER badge
+        // moves immediately when the user clicks a tab — and any
+        // disambiguation dialog appears at click-time, not mid-typing.
+        getTabPane().getSelectionModel().selectedItemProperty().addListener((obs, ov, nv) -> {
+            if (nv instanceof com.kodedu.component.MyTab myTab && myTab.getPath() != null) {
+                pdfPreviewPane.prefetchMasterFor(myTab.getPath());
+            }
         });
 
         liveReloadPane.webEngine().setOnAlert(event -> {
@@ -2384,6 +2459,9 @@ public class ApplicationController extends TextWebSocketHandler implements Initi
 
     private volatile AtomicReference<TextChangeEvent> latestTextChangeEvent = new AtomicReference<>();
     private CountDownLatch adocPreviewReadyLatch = new CountDownLatch(1);
+    /** True debounce for PDF preview: each text change cancels the pending
+     *  render and reschedules.  Render only fires once typing pauses. */
+    private final AtomicReference<ScheduledFuture<?>> pdfPreviewDebounce = new AtomicReference<>();
     private Semaphore semaphore = new Semaphore(1);
     private void renderInRow() throws InterruptedException {
         try {
@@ -2438,7 +2516,28 @@ public class ApplicationController extends TextWebSocketHandler implements Initi
 
                 if (Objects.equals(backend, "html5")) {
                     updateRendered(converterResult.getRendered());
-                    rightShowerHider.showNode(htmlPane);
+                    // Don't steal the preview pane from the user's selected
+                    // backend.  When PDF preview is active the HTML render
+                    // still runs (for outline / refs / live-reload sockets)
+                    // but must not flip the visible pane back to HTML.
+                    if (previewConfigBean.getPreviewBackend() != com.kodedu.config.PreviewBackend.PDF) {
+                        rightShowerHider.showNode(htmlPane);
+                    } else if (previewConfigBean.isPdfPreviewAutoRender()) {
+                        // PDF preview is active: debounce a render so typing
+                        // / tab switches refresh the preview without an
+                        // explicit save or F5.  asciidoctor-pdf takes
+                        // seconds, so we wait until typing pauses (last
+                        // keystroke + 600ms) before kicking the render.
+                        // Skipped entirely when auto-render is disabled
+                        // in Preview Settings -- user must hit Refresh / F5.
+                        ScheduledFuture<?> prev = pdfPreviewDebounce.getAndSet(
+                                threadService.schedule(
+                                        () -> pdfPreviewPane.render(),
+                                        600, TimeUnit.MILLISECONDS));
+                        if (prev != null) {
+                            prev.cancel(false);
+                        }
+                    }
                 }
 
                 if (Objects.equals(backend, "revealjs")) {
@@ -2649,42 +2748,28 @@ public class ApplicationController extends TextWebSocketHandler implements Initi
 
     public void saveDoc() {
         current.currentTab().saveDoc();
-        triggerPdfPreviewIfActive();
     }
 
     @FXML
     public void saveDoc(Event actionEvent) {
         current.currentTab().saveDoc();
-        triggerPdfPreviewIfActive();
     }
 
     /**
      * Set the right-hand preview master based on the selected backend.
      * Triggered at startup and whenever {@code previewBackend} changes.
+     *
+     * <p>Does NOT kick a render — the keystroke-debounced render in
+     * {@code renderText} owns that.  Opening a document or switching tabs
+     * fires a textListener on its own, which in turn schedules the render.
      */
     private void applyPreviewBackend(com.kodedu.config.PreviewBackend backend) {
+        logger.info("Preview backend = {} (scope={})", backend,
+                previewConfigBean.getPdfPreviewScope());
         if (backend == com.kodedu.config.PreviewBackend.PDF) {
             rightShowerHider.setMaster(pdfPreviewPane);
-            // Kick a render only if there's already an open document.  At
-            // startup no tab exists yet, and rendering would try to read
-            // an uninitialized editor JS context.  The first save / F5 /
-            // tab switch will trigger the real first render.
-            if (current.currentTab() != null && current.currentTab().getPath() != null) {
-                pdfPreviewPane.render();
-            }
         } else {
             rightShowerHider.setMaster(htmlPane);
-        }
-    }
-
-    /**
-     * Kick a fresh PDF preview render after the document is saved, but only
-     * when PDF is the active backend.  HTML preview already updates live on
-     * keystrokes so it doesn't need this hook.
-     */
-    private void triggerPdfPreviewIfActive() {
-        if (previewConfigBean.getPreviewBackend() == com.kodedu.config.PreviewBackend.PDF) {
-            pdfPreviewPane.render();
         }
     }
 

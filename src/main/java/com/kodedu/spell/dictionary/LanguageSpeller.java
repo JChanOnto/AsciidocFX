@@ -23,7 +23,16 @@ public class LanguageSpeller {
 
 
     public boolean isMisspelled(String word) {
-        return speller.isMisspelled(word);
+        // morfologik.speller.Speller is NOT thread-safe — it reuses
+        // internal ByteBuffer state across calls. Concurrent invocations
+        // (which happen freely on the virtual-thread pool) corrupt the
+        // buffer's position and throw CoderMalfunctionError. Synchronize
+        // on the speller instance so a single dictionary serialises its
+        // own queries; callers from different dictionaries don't block
+        // each other.
+        synchronized (speller) {
+            return speller.isMisspelled(word);
+        }
     }
 
     public Dictionary getDictionary() {
@@ -60,16 +69,20 @@ public class LanguageSpeller {
     }
 
     public boolean isInDictionary(String word) {
-        return speller.isInDictionary(word);
+        synchronized (speller) {
+            return speller.isInDictionary(word);
+        }
     }
 
     public List<String> findSuggestions(String word) {
         final ArrayList<String> resultList = new ArrayList<>();
         try {
-            final List<String> runOnWords = speller.replaceRunOnWords(word);
-            final List<String> replacements = speller.findReplacements(word);
-            resultList.addAll(runOnWords);
-            resultList.addAll(replacements);
+            synchronized (speller) {
+                final List<String> runOnWords = speller.replaceRunOnWords(word);
+                final List<String> replacements = speller.findReplacements(word);
+                resultList.addAll(runOnWords);
+                resultList.addAll(replacements);
+            }
             return resultList;
         } catch (Throwable e) {
 //            logger.error(e.getMessage(), e);

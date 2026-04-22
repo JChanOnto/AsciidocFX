@@ -86,7 +86,7 @@ public class DictionaryService {
                 .filter(t -> {
                     try {
                         return languageSpeller.isMisspelled(t.getValue());
-                    } catch (Exception e) {
+                    } catch (Throwable e) {
 //                        logger.info("Couldn't spell the word: {}", t.getValue(), e);
                         return false;
                     }
@@ -96,7 +96,7 @@ public class DictionaryService {
                         final List<String> suggestions = languageSpeller.findSuggestions(t.getValue());
                         t.setEmptySuggestion(suggestions.isEmpty());
                         suggestionMap.put(t.getValue(), suggestions);
-                    } catch (Exception e) {
+                    } catch (Throwable e) {
 //                        logger.info("Couldn't find suggestions for value {}", t.getValue(), e);
                     }
                 })

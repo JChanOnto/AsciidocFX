@@ -111,8 +111,11 @@ with "Save → PDF", so what you see is what you ship.
   TOC. First render is slow (`~69s` cold); subsequent renders benefit
   from the `imagesoutdir` / mmdc diagram cache.
 
-**Triggers**: **Ctrl+S** and **F5** kick a re-render. No keystroke
-debounce — even chapter renders are too heavy for live-typing feedback.
+**Triggers**: opening a chapter and typing kick a re-render
+(keystrokes debounced ~600 ms after the last edit). **F5** forces a
+manual refresh. Saving the document does *not* trigger a render — the
+debounced typing-pause render already covers it. A three-dot pulse in
+the preview toolbar shows when a render is in flight.
 
 **Switching back to HTML preview**: set `previewBackend` to `HTML` in
 `Settings → Preview Settings`. The right pane swaps live, no restart.

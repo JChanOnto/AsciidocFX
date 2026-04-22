@@ -194,6 +194,11 @@ public class SpringAppConfig extends SpringBootServletInitializer implements Web
                     mathInlineMacroProcessor,
                     cacheSuffixAppenderProcessor);
             asciidoctor.requireLibrary("openssl", "asciidoctor-diagram", "asciidoctor-pdf", "asciidoctor-epub3");
+            // Tell PdfRenderer that the PDF converter is now registered
+            // on this doctor.  Renderers block on
+            // AsciidoctorFactory.waitForPdfBackend() to avoid the
+            // "missing converter for backend 'pdf'" startup race.
+            com.kodedu.service.AsciidoctorFactory.signalPdfBackendReady();
         });
         return asciidoctor;
     }

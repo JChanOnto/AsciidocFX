@@ -29,6 +29,15 @@ public class AsciidoctorFactory {
     private static CountDownLatch revealDoctorReady = new CountDownLatch(1);
     private static CountDownLatch htmlDoctorReady = new CountDownLatch(1);
     private static CountDownLatch nonHtmlDoctorReady = new CountDownLatch(1);
+    /**
+     * Flips when {@code asciidoctor-pdf} (and the rest of the non-HTML
+     * gem set) has finished loading on the {@link #nonHtmlDoctor}.  The
+     * {@link #nonHtmlDoctorReady} latch only signals "the bean is
+     * resolvable" — its async {@code requireLibrary} call may still be
+     * mid-load. Renderers that need the PDF backend should
+     * {@link #waitForPdfBackend() wait on this} instead.
+     */
+    private static CountDownLatch pdfBackendReady = new CountDownLatch(1);
     private static Asciidoctor plainDoctor;
     private static Asciidoctor revealDoctor;
     private static Asciidoctor htmlDoctor;
@@ -115,6 +124,23 @@ public class AsciidoctorFactory {
         waitLatch(nonHtmlDoctorReady);
         checkUserExtensions(nonHtmlDoctor);
         return nonHtmlDoctor;
+    }
+
+    /**
+     * Block the caller until {@code asciidoctor-pdf} has finished loading
+     * on the non-HTML doctor.  Counted down by
+     * {@code SpringAppConfig.nonHtmlDoctor()} on its async startup
+     * thread; without this gate, the first PDF preview render can race
+     * the load and explode with
+     * {@code "missing converter for backend 'pdf'"}.
+     */
+    public static void waitForPdfBackend() {
+        waitLatch(pdfBackendReady);
+    }
+
+    /** Internal: signal that the non-HTML doctor's PDF backend is loaded. */
+    public static void signalPdfBackendReady() {
+        pdfBackendReady.countDown();
     }
 
     public static Asciidoctor getPlainDoctor() {

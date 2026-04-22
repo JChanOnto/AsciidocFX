@@ -1,6 +1,7 @@
 package com.kodedu.service.convert.pdf;
 
 import com.kodedu.config.PdfConfigBean;
+import com.kodedu.service.ProjectConfigDiscovery;
 import com.kodedu.service.extension.processor.ExtensionPreprocessor;
 import org.asciidoctor.Attributes;
 import org.asciidoctor.Options;
@@ -79,12 +80,13 @@ public class PdfRenderer {
         List<String> externalCmd = resolveExternalCommand();
         if (externalCmd != null) {
             renderViaExternal(externalCmd, asciidoc, baseDir, outPdf);
-            logger.debug("PDF render (external {}): {} -> {} in {} ms",
-                    externalCmd.get(0), baseDir, outPdf, System.currentTimeMillis() - t0);
+            logger.info("PDF render (external {}) {} bytes in {} ms -> {}",
+                    externalCmd.get(0), safeSize(outPdf),
+                    System.currentTimeMillis() - t0, outPdf);
         } else {
             renderViaJRuby(asciidoc, baseDir, outPdf);
-            logger.debug("PDF render (jruby): {} -> {} in {} ms",
-                    baseDir, outPdf, System.currentTimeMillis() - t0);
+            logger.info("PDF render (jruby) {} bytes in {} ms -> {}",
+                    safeSize(outPdf), System.currentTimeMillis() - t0, outPdf);
         }
     }
 
@@ -107,6 +109,10 @@ public class PdfRenderer {
         return null;
     }
 
+    private static long safeSize(Path p) {
+        try { return Files.size(p); } catch (IOException e) { return -1L; }
+    }
+
     private void renderViaJRuby(String asciidoc, Path baseDir, Path outPdf) {
         File destFile = outPdf.toFile();
         SafeMode safe = convertSafe(pdfConfigBean.getSafe());
@@ -121,7 +127,19 @@ public class PdfRenderer {
                 .attributes(attributes)
                 .build();
         String content = ExtensionPreprocessor.correctExtensionBlocks(asciidoc);
-        getNonHtmlDoctor().convert(content, options);
+        org.asciidoctor.Asciidoctor doctor = getNonHtmlDoctor();
+        // Block until SpringAppConfig.nonHtmlDoctor()'s async require of
+        // asciidoctor-pdf has actually finished.  The doctor-readiness
+        // latch only signals "bean resolvable" — the gem load happens on
+        // a separate virtual thread and can still be in flight when the
+        // first preview render lands, producing
+        //   "missing converter for backend 'pdf'"
+        // from update_backend_attributes.  This latch is the canonical
+        // signal that the converter is registered and convert() is safe.
+        com.kodedu.service.AsciidoctorFactory.waitForPdfBackend();
+        synchronized (doctor) {
+            doctor.convert(content, options);
+        }
     }
 
     /**
@@ -142,6 +160,21 @@ public class PdfRenderer {
 
             List<String> argv = new ArrayList<>(command);
             argv.add("-r"); argv.add("asciidoctor-diagram");
+
+            // Mirror the JRuby path (AsciidoctorFactory): auto-discover and
+            // require any project Ruby extensions (.asciidoctorconfig
+            // :asciidoctor-extensions: + content-validated *.rb files) so the
+            // external CLI sees the same extension set as in-process renders.
+            try {
+                List<Path> rubyExtensions = ProjectConfigDiscovery.resolveRubyExtensions(baseDir);
+                for (Path ext : rubyExtensions) {
+                    argv.add("-r"); argv.add(ext.toAbsolutePath().toString());
+                }
+            } catch (RuntimeException ex) {
+                logger.warn("Failed to resolve project Ruby extensions for external render: {}",
+                        ex.getMessage());
+            }
+
             argv.add("--safe-mode"); argv.add(pdfConfigBean.getSafe());
             if (Boolean.TRUE.equals(pdfConfigBean.getSourcemap())) {
                 argv.add("-a"); argv.add("sourcemap");
