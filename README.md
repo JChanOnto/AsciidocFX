@@ -116,12 +116,30 @@ with; newer point releases are usually fine.
 
 ### Install — Windows (PowerShell)
 
+Apache Maven is not published on winget, so the Windows instructions use a
+mix of winget (for everything else) and either Scoop or a manual Maven
+install. Pick **one** Maven option.
+
 ```powershell
-# JDK 17 + Maven + Node + Graphviz via winget
+# JDK 17 + Node + Graphviz via winget
 winget install --id EclipseAdoptium.Temurin.17.JDK
-winget install --id Apache.Maven
 winget install --id OpenJS.NodeJS.LTS
 winget install --id Graphviz.Graphviz
+
+# --- Maven: pick ONE of the following ---
+
+# Option A: Scoop (recommended, no admin required)
+#   If you don't have Scoop: https://scoop.sh
+scoop install main/maven
+
+# Option B: Chocolatey (requires admin)
+choco install maven -y
+
+# Option C: Manual
+#   Download apache-maven-3.9.x-bin.zip from https://maven.apache.org/download.cgi
+#   Extract to e.g. C:\Tools\apache-maven-3.9.x
+#   Add C:\Tools\apache-maven-3.9.x\bin to PATH
+#   setx M2_HOME "C:\Tools\apache-maven-3.9.x"
 
 # Mermaid CLI
 npm install -g @mermaid-js/mermaid-cli
