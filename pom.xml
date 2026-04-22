@@ -23,6 +23,14 @@
         <install4j.appSpecificPassword>${env.MAC_APP_PASSWORD}</install4j.appSpecificPassword>
         <install4j.winKeyStorePassword>${env.WIN_KEYSTORE_PASSWORD}</install4j.winKeyStorePassword>
         <openjfx.version>25-ea+21</openjfx.version>
+        <!--
+          Default JavaFX SDK module-path. Auto-set per OS by the
+          os-windows / os-mac / os-mac-arm / os-linux profiles below.
+          Override on the command line with -Djavafx.module.path=...
+          The matching native libraries (DLL/dylib/so) live next to the jars
+          under jmods/<os>-jars/bin (Windows) or jmods/<os>-jars (Unix).
+        -->
+        <javafx.module.path>${project.basedir}/jmods/windows-jars/lib</javafx.module.path>
         <openjfx-monocle.version>jdk-21.0.1</openjfx-monocle.version>
         <ikonli.version>12.4.0</ikonli.version>
         <jaxb.version>2.3.2</jaxb.version>
@@ -428,6 +436,45 @@
     </build>
 
     <profiles>
+        <!-- Auto-detect the JavaFX SDK location per OS so `mvn -P local-run
+             spring-boot:run` works on any platform without manual flags. -->
+        <profile>
+            <id>os-windows</id>
+            <activation>
+                <os><family>windows</family></os>
+            </activation>
+            <properties>
+                <javafx.module.path>${project.basedir}/jmods/windows-jars/lib</javafx.module.path>
+            </properties>
+        </profile>
+        <profile>
+            <id>os-mac-arm</id>
+            <activation>
+                <os><family>mac</family><arch>aarch64</arch></os>
+            </activation>
+            <properties>
+                <javafx.module.path>${project.basedir}/jmods/mac-m1-jars</javafx.module.path>
+            </properties>
+        </profile>
+        <profile>
+            <id>os-mac</id>
+            <activation>
+                <os><family>mac</family><arch>x86_64</arch></os>
+            </activation>
+            <properties>
+                <javafx.module.path>${project.basedir}/jmods/mac-jars</javafx.module.path>
+            </properties>
+        </profile>
+        <profile>
+            <id>os-linux</id>
+            <activation>
+                <os><family>unix</family><name>linux</name></os>
+            </activation>
+            <properties>
+                <javafx.module.path>${project.basedir}/jmods/linux-jars</javafx.module.path>
+            </properties>
+        </profile>
+
         <profile>
             <id>install4j-package</id>
             <build>
@@ -686,7 +733,7 @@
                                 --add-exports=javafx.controls/com.sun.javafx.scene.control=ALL-UNNAMED
                                 --add-modules=javafx.controls,javafx.fxml,javafx.graphics,javafx.media,javafx.swing,javafx.web
                                 --add-modules=ALL-MODULE-PATH
-                                --module-path ./jmods/mac-m1-jars
+                                --module-path ${javafx.module.path}
                             </jvmArguments>
                         </configuration>
                         <dependencies>

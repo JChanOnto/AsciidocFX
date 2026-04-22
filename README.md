@@ -94,7 +94,7 @@ with; newer point releases are usually fine.
 
 | Tool                          | Version | Purpose                                                    |
 | ----------------------------- | ------- | ---------------------------------------------------------- |
-| **JDK**                       | 17 LTS  | Build + runtime. Eclipse Temurin recommended.              |
+| **JDK**                       | 25 LTS  | Build + runtime. Eclipse Temurin recommended. The pom pins `<java.version>25</java.version>` — older JDKs will fail with `release version 25 not supported`. |
 | **Apache Maven**              | 3.9+    | Build tool. `mvn` must be on `PATH`.                       |
 | **Git**                       | any     | Source control + cloning JavaFX jmods on first build.      |
 
@@ -121,8 +121,8 @@ mix of winget (for everything else) and either Scoop or a manual Maven
 install. Pick **one** Maven option.
 
 ```powershell
-# JDK 17 + Node + Graphviz via winget
-winget install --id EclipseAdoptium.Temurin.17.JDK
+# JDK 25 + Node + Graphviz via winget
+winget install --id EclipseAdoptium.Temurin.25.JDK
 winget install --id OpenJS.NodeJS.LTS
 winget install --id Graphviz.Graphviz
 
@@ -155,7 +155,7 @@ dot -V
 ### Install — macOS (Homebrew)
 
 ```bash
-brew install --cask temurin@17
+brew install --cask temurin@25
 brew install maven node graphviz
 npm install -g @mermaid-js/mermaid-cli
 ```
@@ -163,44 +163,146 @@ npm install -g @mermaid-js/mermaid-cli
 ### Install — Linux (Debian/Ubuntu)
 
 ```bash
+# Debian/Ubuntu currently package OpenJDK 21 as the newest stable; for JDK 25
+# install Eclipse Temurin from https://adoptium.net/installation/linux/ or use
+# SDKMAN (`sdk install java 25-tem`).
 sudo apt-get update
-sudo apt-get install -y openjdk-17-jdk maven nodejs npm graphviz \
-                        ttf-mscorefonts-installer
+sudo apt-get install -y maven nodejs npm graphviz ttf-mscorefonts-installer
 sudo npm install -g @mermaid-js/mermaid-cli
 ```
 
 ### Environment variables
 
 ```powershell
-# Windows
-setx JAVA_HOME "C:\Program Files\Eclipse Adoptium\jdk-17"
+# Windows — the exact JDK folder name includes the patch version, so resolve
+# it dynamically. Run in a NEW terminal afterwards so PATH/JAVA_HOME refresh.
+$jdk = (Get-ChildItem 'C:\Program Files\Eclipse Adoptium' -Directory |
+        Where-Object Name -Like 'jdk-25*' | Select-Object -First 1).FullName
+
+# JAVA_HOME is short, so setx is fine here.
+setx JAVA_HOME $jdk
 setx GRAPHVIZ_DOT "C:\Program Files\Graphviz\bin\dot.exe"
+
+# DO NOT use `setx PATH ...` — it silently truncates the User PATH to 1024
+# chars (and rewrites it as REG_SZ, losing %VAR% expansion). Instead, append
+# new entries to the User PATH directly via the registry:
+function Add-UserPath([string]$Entry) {
+    $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
+    $cur = [string]$key.GetValue('Path', '', 'DoNotExpandEnvironmentNames')
+    $parts = @($cur -split ';' | Where-Object { $_ })
+    if ($parts -notcontains $Entry) {
+        $parts += $Entry
+        $new = ($parts -join ';')
+        # ExpandString lets you use %JAVA_HOME%, %USERPROFILE%, etc.
+        $key.SetValue('Path', $new, [Microsoft.Win32.RegistryValueKind]::ExpandString)
+    }
+    $key.Close()
+}
+Add-UserPath '%JAVA_HOME%\bin'
+# Also add Graphviz to PATH if `dot` is not found:
+#   Add-UserPath 'C:\Program Files\Graphviz\bin'
 ```
 
 ```bash
 # macOS / Linux (add to ~/.zshrc or ~/.bashrc)
-export JAVA_HOME="$(/usr/libexec/java_home -v 17)"   # macOS
-export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64  # Linux
+export JAVA_HOME="$(/usr/libexec/java_home -v 25)"   # macOS
+export JAVA_HOME=/usr/lib/jvm/temurin-25-jdk-amd64   # Linux (Temurin .deb)
+export PATH="$JAVA_HOME/bin:$PATH"
 export GRAPHVIZ_DOT="$(which dot)"
 ```
 
-> JavaFX is **not** a separate install — the required `jmods` are vendored
-> under [`jmods/`](jmods/) per platform and Maven picks the right one
-> automatically.
+### One-time: download the JavaFX SDK for your platform
+
+Maven needs the JavaFX runtime jars **and** native libraries on the module
+path / PATH to launch a JavaFX app. The repo ships only the link-time
+`.jmod` files under `jmods/<os>/`; the runtime SDK is downloaded once into
+`jmods/<os>-jars/` (gitignored). Pick the script for your OS:
+
+```powershell
+# Windows
+.\download_javafx_jars.ps1
+```
+
+```bash
+# macOS / Linux (downloads SDKs for all *nix targets)
+bash download_javafx_jars.sh
+```
+
+The resulting layout is:
+
+| Platform        | Extracted to                                |
+| --------------- | ------------------------------------------- |
+| Windows x64     | `jmods/windows-jars/{lib,bin}/`             |
+| macOS x86_64    | `jmods/mac-jars/`                           |
+| macOS aarch64   | `jmods/mac-m1-jars/`                        |
+| Linux x64       | `jmods/linux-jars/`                         |
+
+The pom auto-detects your OS and points `--module-path` at the right
+folder. No manual flags needed.
 
 ## Building
 
+A plain `mvn package` only produces `target/AsciidocFX.jar`. To get a runnable
+launcher script (and a portable zip distribution), build with the
+`install4j-package` profile:
+
 ```powershell
-# Full build (skips tests for speed; drop -DskipTests for the full suite)
-mvn clean package -DskipTests
+# Compile + package into target/appassembler/ (launcher + conf + lib)
+# Also produces target/asciidocfx-<version>.zip
+mvn -P install4j-package clean package -DskipTests
 ```
 
 After a successful build:
 
-- **Run from sources**: `target/appassembler/bin/asciidocfx.bat` (Windows) or
-  `asciidocfx.sh` (macOS/Linux).
-- **Native installers**: produced by the GitHub Actions workflow using
-  install4j; see [`asciidocfx.install4j`](asciidocfx.install4j).
+| Artifact                                              | What it is                                                  |
+| ----------------------------------------------------- | ----------------------------------------------------------- |
+| `target/appassembler/bin/asciidocfx.bat`              | Windows launcher — **double-click or run from a terminal**. |
+| `target/appassembler/bin/asciidocfx`                  | macOS / Linux launcher — `chmod +x` then run.               |
+| `target/appassembler/lib/`                            | All runtime jars (flat layout).                             |
+| `target/appassembler/conf/`                           | Editor / Asciidoctor / theme config.                        |
+| `target/asciidocfx-<version>.zip`                     | Portable bundle of the above — unzip anywhere and run.      |
+| `target/AsciidocFX.jar`                               | Bare jar (no classpath) — for embedding only.               |
+| `target/asciidocfx_*.exe`, `*.dmg`, `*.deb`, `*.rpm`  | Native installers — only when the `install4j-build` profile runs (CI). |
+
+### Run it
+
+The simplest path that works on every platform:
+
+```powershell
+# Windows — JavaFX native DLLs must be on PATH for QuantumRenderer to start
+$env:Path = "$PWD\jmods\windows-jars\bin;$env:Path"
+mvn -P local-run spring-boot:run
+```
+
+```bash
+# macOS — JavaFX dylibs are loaded from the SDK lib/ folder automatically
+mvn -P local-run spring-boot:run
+```
+
+```bash
+# Linux — same as macOS; if libs aren't picked up, add them to LD_LIBRARY_PATH:
+export LD_LIBRARY_PATH="$PWD/jmods/linux-jars:$LD_LIBRARY_PATH"
+mvn -P local-run spring-boot:run
+```
+
+The `local-run` profile uses Spring Boot's exec plugin and auto-resolves
+`--module-path` per OS, so no `-Djavafx.module.path=...` is required unless
+you keep the SDK somewhere non-default.
+
+### Run the packaged launcher
+
+The launcher script under `target/appassembler/bin/` is intended for the
+install4j-bundled distribution (which ships its own JRE). Running it
+directly against a system JDK requires injecting JavaFX yourself:
+
+```powershell
+# Windows
+$env:Path     = "$PWD\jmods\windows-jars\bin;$env:Path"
+$env:JAVA_OPTS = "--module-path `"$PWD\jmods\windows-jars\lib`""
+.\target\appassembler\bin\asciidocfx.bat
+```
+
+For day-to-day development, prefer `mvn -P local-run spring-boot:run`.
 
 For the full upstream build/run/contributing notes see
 [`README.adoc`](README.adoc) and [`CONTRIBUTING.md`](CONTRIBUTING.md).
