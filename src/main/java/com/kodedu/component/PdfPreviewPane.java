@@ -168,6 +168,13 @@ public class PdfPreviewPane extends ViewPanel {
 
     private void renderNow() {
         try {
+            // Guard against being invoked before any tab is opened — the
+            // editor's JS context (`editor` variable) doesn't exist yet and
+            // currentEditorValue() would throw a JSException.
+            if (current.currentTab() == null || current.currentTab().getPath() == null) {
+                setStatusLater("Open a document to preview.");
+                return;
+            }
             String asciidoc = current.currentEditorValue();
             if (asciidoc == null) {
                 setStatusLater("No active document.");

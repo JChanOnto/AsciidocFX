@@ -2665,9 +2665,13 @@ public class ApplicationController extends TextWebSocketHandler implements Initi
     private void applyPreviewBackend(com.kodedu.config.PreviewBackend backend) {
         if (backend == com.kodedu.config.PreviewBackend.PDF) {
             rightShowerHider.setMaster(pdfPreviewPane);
-            // Render eagerly so the user sees something other than an empty
-            // pane as soon as they switch to PDF mode.
-            pdfPreviewPane.render();
+            // Kick a render only if there's already an open document.  At
+            // startup no tab exists yet, and rendering would try to read
+            // an uninitialized editor JS context.  The first save / F5 /
+            // tab switch will trigger the real first render.
+            if (current.currentTab() != null && current.currentTab().getPath() != null) {
+                pdfPreviewPane.render();
+            }
         } else {
             rightShowerHider.setMaster(htmlPane);
         }

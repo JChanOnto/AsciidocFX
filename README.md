@@ -22,6 +22,8 @@ casual editing, but breaks down for projects that:
   `useMaxWidth` for prawn-svg, etc.)
 - Want **SVG Mermaid diagrams** in every output (HTML preview, HTML export,
   PDF, EPUB, DocBook, Reveal.js) for crisp rendering
+- Want a **preview pane that matches the actual PDF output** (theme,
+  fonts, pagination) instead of a CSS approximation
 
 Out of the box, AsciidocFX would ignore all of these unless the user manually
 copied them into `~/.AsciidocFX-<version>/asciidoctor_pdf.json` etc. — and
@@ -83,6 +85,35 @@ the default for other diagram types.
 > **Note**: PDF / EPUB / DocBook still require the `mmdc` CLI on `PATH`
 > (`npm install -g @mermaid-js/mermaid-cli`) — that's how
 > `asciidoctor-diagram` works, this fork doesn't change it.
+
+### 3. Real PDF preview pane (1:1 with `Save → PDF`)
+
+The right-hand preview now shows the **actual PDF** that
+`asciidoctor-pdf` produces — same theme, fonts, pagination, headers,
+footers — instead of a WebKit/CSS approximation. The pipeline is shared
+with "Save → PDF", so what you see is what you ship.
+
+| File / class                                                                                                | Role                                                                          |
+| ----------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| [`PdfPreviewPane`](src/main/java/com/kodedu/component/PdfPreviewPane.java)                                  | `ViewPanel` sibling of `HtmlPane`; rasterizes pages with PDFBox into a scrollable `ImageView` list with a zoom slider. |
+| [`PdfRenderer`](src/main/java/com/kodedu/service/convert/pdf/PdfRenderer.java)                              | Single source of truth for PDF generation; reused by the preview *and* `Save → PDF`. |
+| [`PreviewSourceResolver`](src/main/java/com/kodedu/service/preview/PreviewSourceResolver.java)              | Synthesizes a single-chapter mini-master when the active file is `include::`d. |
+| [`PreviewBackend`](src/main/java/com/kodedu/config/PreviewBackend.java) / `PreviewConfigBean`               | `previewBackend` (PDF default, HTML fallback) + `pdfPreviewScope` (CHAPTER / FULL). |
+
+**Two render scopes** keep the edit loop fast on large documents:
+
+- **Chapter** *(default)* — renders only the active chapter (`~1–3s` per
+  save on the 100-page reference doc). Page numbers / TOC / cross-chapter
+  xrefs are intentionally not canonical; a status banner says so.
+- **Full doc** — renders the entire master with real pagination and
+  TOC. First render is slow (`~69s` cold); subsequent renders benefit
+  from the `imagesoutdir` / mmdc diagram cache.
+
+**Triggers**: **Ctrl+S** and **F5** kick a re-render. No keystroke
+debounce — even chapter renders are too heavy for live-typing feedback.
+
+**Switching back to HTML preview**: set `previewBackend` to `HTML` in
+`Settings → Preview Settings`. The right pane swaps live, no restart.
 
 ## Project configuration with `.asciidoctorconfig`
 
@@ -375,14 +406,19 @@ conflicts in:
 
 - `src/main/java/com/kodedu/service/AsciidoctorFactory.java`
 - `src/main/java/com/kodedu/config/AsciidoctorConfigBase.java`
+- `src/main/java/com/kodedu/config/PreviewConfigBean.java`
+- `src/main/java/com/kodedu/controller/ApplicationController.java`
+- `src/main/java/com/kodedu/boot/AppStarter.java`
+- `src/main/java/com/kodedu/service/convert/pdf/AsciidoctorPdfBookConverter.java`
 - `src/main/java/com/kodedu/service/extension/impl/MermaidServiceImpl.java`
 - `src/main/java/com/kodedu/service/cache/impl/BinaryCacheServiceImpl.java`
 - `conf/public/mermaid.html`
 - `conf/public/js/prototypes.js`
 - `conf/public/js/asciidoctor-block-extensions.js`
 
-The new `ProjectConfigDiscovery.java` is a self-contained addition with no
-upstream conflict surface.
+The new `ProjectConfigDiscovery.java`, `PdfPreviewPane.java`,
+`PdfRenderer.java`, `PreviewSourceResolver.java`, and `PreviewBackend.java`
+are self-contained additions with no upstream conflict surface.
 
 ## License
 
