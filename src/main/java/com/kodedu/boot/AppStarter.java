@@ -269,6 +269,7 @@ public class AppStarter extends Application {
         scene.getAccelerators().put(new KeyCodeCombination(KeyCode.T, SHORTCUT_DOWN), controller::newDoc);
         scene.getAccelerators().put(new KeyCodeCombination(KeyCode.O, SHORTCUT_DOWN), controller::openDoc);
         scene.getAccelerators().put(new KeyCodeCombination(KeyCode.W, SHORTCUT_DOWN), controller::saveAndCloseCurrentTab);
+        scene.getAccelerators().put(new KeyCodeCombination(KeyCode.F5), controller::refreshPreview);
 
         final ThreadService threadService = context.getBean(ThreadService.class);
 

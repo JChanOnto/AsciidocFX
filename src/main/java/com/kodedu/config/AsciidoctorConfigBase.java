@@ -11,7 +11,8 @@ import com.kodedu.config.factory.TableFactory;
 import com.kodedu.controller.ApplicationController;
 import com.kodedu.helper.IOHelper;
 import com.kodedu.other.JsonHelper;
-import com.kodedu.service.ProjectConfigDiscovery;
+import com.kodedu.service.AsciidoctorConfigLoader;
+import com.kodedu.service.ExecutableResolver;
 import com.kodedu.service.ThreadService;
 import jakarta.json.*;
 import javafx.beans.property.*;
@@ -333,7 +334,12 @@ public abstract class AsciidoctorConfigBase<T extends LoadedAttributes> extends 
     }
 
     public Attributes getAsciiDocAttributes(Map<String, Object> originalDocAttributes) {
-        return getAsciiDocAttributes(originalDocAttributes, null);
+        // No explicit workingDir was provided — fall back to the document's
+        // own docdir attribute so project-level resource discovery (PDF theme,
+        // Mermaid config) still works for the preview/render path.
+        Object docdir = originalDocAttributes.get("docdir");
+        Path workingDir = (docdir instanceof String s && !s.isBlank()) ? Paths.get(s) : null;
+        return getAsciiDocAttributes(originalDocAttributes, workingDir);
     }
 
     public Attributes getAsciiDocAttributes(Map<String, Object> originalDocAttributes, Path workingDir) {
@@ -364,36 +370,20 @@ public abstract class AsciidoctorConfigBase<T extends LoadedAttributes> extends 
         String docdir = (String) originalDocAttributes.get("docdir");
         Map<String, Object> resolvedMap = resolveExtensionBuilderAttributes(docdir, cloneMap);
 
-        // Auto-discover project-level PDF theme and Mermaid config when not
-        // explicitly set in the document or the config UI.
-        // Prefer the working directory (project root) over docdir, since docdir
-        // may point to a subdirectory (e.g. sections/) for included files.
+        // Layer in attributes from project-level .asciidoctorconfig file(s).
+        // The Asciidoctor convention: walk up from the working dir, outer
+        // configs first, inner overrides.  Document-declared attributes and
+        // anything already in resolvedMap (including the GUI attributes table)
+        // take precedence over .asciidoctorconfig.
         Path discoverRoot = Objects.nonNull(workingDir) ? workingDir
                 : (Objects.nonNull(docdir) ? Paths.get(docdir) : null);
         if (Objects.nonNull(discoverRoot) && Files.isDirectory(discoverRoot)) {
-            if (!resolvedMap.containsKey("pdf-theme") || !resolvedMap.containsKey("pdf-themesdir")) {
-                ProjectConfigDiscovery.discoverPdfTheme(discoverRoot).ifPresent(theme -> {
-                    if (!resolvedMap.containsKey("pdf-theme")) {
-                        resolvedMap.put("pdf-theme", theme.themeName());
-                        logger.info("Auto-discovered pdf-theme: {}", theme.themeName());
-                    }
-                    if (!resolvedMap.containsKey("pdf-themesdir")) {
-                        resolvedMap.put("pdf-themesdir", theme.themesDir().toString());
-                        logger.info("Auto-discovered pdf-themesdir: {}", theme.themesDir());
-                    }
-                });
-            }
-            if (!resolvedMap.containsKey("mermaid-config")) {
-                ProjectConfigDiscovery.discoverMermaidConfig(discoverRoot).ifPresent(mermaidPath -> {
-                    resolvedMap.put("mermaid-config", mermaidPath.toString());
-                    logger.info("Auto-discovered mermaid-config: {}", mermaidPath);
-                });
-            }
-            // Default mermaid output to SVG for all backends (asciidoctor-diagram).
-            // SVG yields sharper diagrams and is supported by HTML, PDF (prawn-svg), EPUB, etc.
-            if (!resolvedMap.containsKey("mermaid-format")) {
-                resolvedMap.put("mermaid-format", "svg");
-                logger.info("Auto-set mermaid-format: svg");
+            Map<String, Object> projectConfig = AsciidoctorConfigLoader.load(discoverRoot);
+            for (Map.Entry<String, Object> e : projectConfig.entrySet()) {
+                if (!resolvedMap.containsKey(e.getKey())) {
+                    resolvedMap.put(e.getKey(), e.getValue());
+                    logger.debug("Applied .asciidoctorconfig attribute: {}={}", e.getKey(), e.getValue());
+                }
             }
         }
 
@@ -433,48 +423,26 @@ public abstract class AsciidoctorConfigBase<T extends LoadedAttributes> extends 
     private Map<String, Object> resolveExtensionBuilderAttributes(String docdir, Map<String, Object> docAttributes) {
         Map<String, Object> map = new LinkedHashMap<>(docAttributes);
 
-        if(Objects.isNull(docdir)){
-            return map;
-        }
-
-        Path docPath = Paths.get(docdir);
-
-        if(Files.notExists(docPath)){
-            return map;
-        }
+        Path docPath = (docdir != null && !docdir.isBlank()) ? Paths.get(docdir) : null;
 
         for (String node_extension : node_extensions) {
-            Path extensionPath = Optional.ofNullable(map.get(node_extension))
-                    .map(p -> {
-                        return resolveExtensionPath(docPath, p);
-                    })
-                    .orElseGet(() -> {
-                        String p = String.format("./node_modules/.bin/%s", node_extension);
-                        return resolveExtensionPath(docPath, p);
-                    });
+            Object explicit = map.get(node_extension);
+            String explicitValue = (explicit instanceof String s && !s.isBlank()) ? s : null;
+            Path extensionPath = ExecutableResolver.resolve(node_extension, explicitValue, docPath);
             if (Objects.nonNull(extensionPath)) {
-                if (!extensionPathMap.containsKey(node_extension)) {
-                    logger.info("Extension path resolved: {}", extensionPath);
+                if (!extensionPathMap.containsKey(node_extension)
+                        || !extensionPathMap.get(node_extension).equals(extensionPath)) {
+                    logger.info("Extension path resolved: {} -> {}", node_extension, extensionPath);
                 }
                 map.put(node_extension, extensionPath.toString());
                 extensionPathMap.put(node_extension, extensionPath);
             }
+            // If unresolved we leave the attribute alone (or absent).  asciidoctor-diagram
+            // will surface its own "could not find executable" error for the specific
+            // diagram block, which is preferable to silently skipping.
         }
 
         return map;
-    }
-
-    private Path resolveExtensionPath(Path docPath, Object p) {
-        String path = (String) p;
-        Path firstPath = Paths.get(path);
-        if(Files.exists(firstPath) && Files.isExecutable(firstPath)){
-            return firstPath;
-        }
-        Path secondPath = docPath.resolve(path);
-        if(Files.exists(secondPath) && Files.isExecutable(secondPath)){
-            return secondPath;
-        }
-        return null;
     }
 
     public interface LoadedAttributes {

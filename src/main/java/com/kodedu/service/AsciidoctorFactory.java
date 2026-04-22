@@ -79,7 +79,7 @@ public class AsciidoctorFactory {
         Set<String> alreadyLoaded = extensions.stream()
                 .map(p -> p.getFileName().toString())
                 .collect(java.util.stream.Collectors.toSet());
-        List<Path> discovered = ProjectConfigDiscovery.discoverRubyExtensions(workingDir);
+        List<Path> discovered = ProjectConfigDiscovery.resolveRubyExtensions(workingDir);
         for (Path ext : discovered) {
             if (!alreadyLoaded.contains(ext.getFileName().toString())) {
                 extensions.add(ext);

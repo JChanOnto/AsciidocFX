@@ -84,6 +84,67 @@ the default for other diagram types.
 > (`npm install -g @mermaid-js/mermaid-cli`) — that's how
 > `asciidoctor-diagram` works, this fork doesn't change it.
 
+## Project configuration with `.asciidoctorconfig`
+
+Drop a `.asciidoctorconfig` file in your project root to set
+project-wide attributes. It uses the standard
+[Asciidoctor convention](https://docs.asciidoctor.org/asciidoctor/latest/cli/config-files/) —
+the same file the IntelliJ plugin and `asciidoctor` CLI honor.
+
+Discovery walks **up** from the document toward your home directory;
+outer files load first, inner files override. The token
+`{asciidoctorconfigdir}` (Asciidoctor convention) expands to the
+directory containing the config file.
+
+**Syntax**: `:name: value` to set, `:!name:` to unset, `// ...` comment.
+
+### Common attributes
+
+| Attribute                    | Purpose                                                              |
+| ---------------------------- | -------------------------------------------------------------------- |
+| `pdf-theme` / `pdf-themesdir`| asciidoctor-pdf YAML theme name + dir                                |
+| `mermaid-config` / `mermaid-format` | Mermaid JSON config; `svg` (recommended) or `png`             |
+| `mmdc` / `vg2png` / `vg2svg` / `nomnoml` / `bytefield` | Override auto-detected CLI paths       |
+| `imagesdir`, `source-highlighter`, `icons`, `experimental` | Standard Asciidoctor toggles       |
+| `asciidoctor-extensions`     | Explicit list of Ruby extension files/dirs/globs (skips auto-walker) |
+
+### Example
+
+```adoc
+:pdf-theme: truedac
+:pdf-themesdir: {asciidoctorconfigdir}/theme
+:mermaid-config: {asciidoctorconfigdir}/theme/mermaid-config.json
+:mermaid-format: svg
+:imagesdir: screenshots
+:source-highlighter: rouge
+:icons: font
+:asciidoctor-extensions: {asciidoctorconfigdir}/theme/extensions
+```
+
+### CLI executable resolution
+
+For Node-based CLIs (`mmdc` etc.) AsciidocFX tries, in order:
+explicit attribute → walk-up `node_modules/.bin/` → OS `PATH` (Windows
+prefers `.cmd`/`.exe`) → well-known install locations (`%APPDATA%\npm`,
+scoop shims, Homebrew, `/usr/local/bin`). If nothing resolves, a single
+warning is logged and conversion continues.
+
+### Ruby extensions
+
+By default, `*.rb` files anywhere under the project are auto-loaded if
+they look like Asciidoctor extensions. Set `:asciidoctor-extensions:` to
+a comma/semicolon-separated list of files, directories, or globs to
+skip the walker and load only what you specify. The conventional
+`.asciidoctor/lib/` directory is always loaded regardless.
+
+### Attribute precedence (highest wins)
+
+1. Document-header attributes (`:pdf-theme: …` in the `.adoc`)
+2. AsciidocFX GUI attributes table
+3. PDF JSON config (`asciidoctor_pdf.json`)
+4. `.asciidoctorconfig` (innermost first)
+5. Built-in defaults
+
 ## Setup — prerequisites for building
 
 You need the following installed and on `PATH` before you can build or run

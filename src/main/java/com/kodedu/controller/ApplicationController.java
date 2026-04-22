@@ -363,6 +363,8 @@ public class ApplicationController extends TextWebSocketHandler implements Initi
 
     @Autowired
     private LiveReloadPane liveReloadPane;
+    @Autowired
+    private PdfPreviewPane pdfPreviewPane;
     private List<String> supportedModes;
 
     @Autowired
@@ -577,7 +579,7 @@ public class ApplicationController extends TextWebSocketHandler implements Initi
                     }));
         });
 
-        Arrays.asList(htmlPane, slidePane, liveReloadPane).forEach(viewPanel -> VBox.getVgrow(viewPanel));
+        Arrays.asList(htmlPane, slidePane, liveReloadPane, pdfPreviewPane).forEach(viewPanel -> VBox.getVgrow(viewPanel));
 
         progressBar.prefWidthProperty().bind(rightShowerHider.widthProperty());
 
@@ -592,7 +594,11 @@ public class ApplicationController extends TextWebSocketHandler implements Initi
                 ));
 
         threadService.runActionLater(() -> {
-            rightShowerHider.setMaster(htmlPane);
+            applyPreviewBackend(previewConfigBean.getPreviewBackend());
+            // Switch the visible preview pane when the user changes the
+            // "preview backend" setting at runtime.
+            previewConfigBean.previewBackendProperty().addListener((obs, ov, nv) ->
+                    threadService.runActionLater(() -> applyPreviewBackend(nv), true));
         }, true);
 
         initializeLogViewer();
@@ -2643,11 +2649,50 @@ public class ApplicationController extends TextWebSocketHandler implements Initi
 
     public void saveDoc() {
         current.currentTab().saveDoc();
+        triggerPdfPreviewIfActive();
     }
 
     @FXML
     public void saveDoc(Event actionEvent) {
         current.currentTab().saveDoc();
+        triggerPdfPreviewIfActive();
+    }
+
+    /**
+     * Set the right-hand preview master based on the selected backend.
+     * Triggered at startup and whenever {@code previewBackend} changes.
+     */
+    private void applyPreviewBackend(com.kodedu.config.PreviewBackend backend) {
+        if (backend == com.kodedu.config.PreviewBackend.PDF) {
+            rightShowerHider.setMaster(pdfPreviewPane);
+            // Render eagerly so the user sees something other than an empty
+            // pane as soon as they switch to PDF mode.
+            pdfPreviewPane.render();
+        } else {
+            rightShowerHider.setMaster(htmlPane);
+        }
+    }
+
+    /**
+     * Kick a fresh PDF preview render after the document is saved, but only
+     * when PDF is the active backend.  HTML preview already updates live on
+     * keystrokes so it doesn't need this hook.
+     */
+    private void triggerPdfPreviewIfActive() {
+        if (previewConfigBean.getPreviewBackend() == com.kodedu.config.PreviewBackend.PDF) {
+            pdfPreviewPane.render();
+        }
+    }
+
+    /**
+     * F5 — force a preview refresh.  Triggers a PDF re-render when PDF is
+     * the active backend; no-op for HTML preview (which already updates
+     * live on keystrokes).
+     */
+    public void refreshPreview() {
+        if (previewConfigBean.getPreviewBackend() == com.kodedu.config.PreviewBackend.PDF) {
+            pdfPreviewPane.render();
+        }
     }
 
     public void saveAndCloseCurrentTab() {
