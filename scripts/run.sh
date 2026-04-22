@@ -8,14 +8,18 @@
 # Usage:
 #   ./scripts/run.sh                    # ensure setup, then mvn local-run
 #   ./scripts/run.sh --skip-setup       # don't call setup.sh first
+#   ./scripts/run.sh --software-render  # force JavaFX software pipeline
+#                                       # (use over headless / VM / no GPU)
 
 set -euo pipefail
 
 skip_setup=0
+software_render=0
 for arg in "$@"; do
     case "$arg" in
         --skip-setup) skip_setup=1 ;;
-        -h|--help) sed -n '2,12p' "$0"; exit 0 ;;
+        --software-render) software_render=1 ;;
+        -h|--help) sed -n '2,14p' "$0"; exit 0 ;;
         *) echo "Unknown option: $arg" >&2; exit 2 ;;
     esac
 done
@@ -42,6 +46,21 @@ esac
 if [[ ! -d "$jfx_dir" ]]; then
     echo "JavaFX SDK not found at $jfx_dir. Run scripts/setup.sh first." >&2
     exit 1
+fi
+
+# JavaFX 25 has no automatic GPU->software fallback when the prism pipeline
+# fails to initialize. Symptom: NPE from QuantumToolkit.isSupported because
+# GraphicsPipeline.getPipeline() returns null. -Dprism.order=sw forces the
+# software pipeline. JAVA_TOOL_OPTIONS is appended by the JVM launcher, so
+# it stacks with pom.xml's <jvmArguments>.
+if (( software_render )); then
+    sw='-Dprism.order=sw -Dprism.verbose=true'
+    if [[ -n "${JAVA_TOOL_OPTIONS:-}" ]]; then
+        export JAVA_TOOL_OPTIONS="$JAVA_TOOL_OPTIONS $sw"
+    else
+        export JAVA_TOOL_OPTIONS="$sw"
+    fi
+    echo "[run] --software-render: JAVA_TOOL_OPTIONS=$JAVA_TOOL_OPTIONS"
 fi
 
 cd "$repo_root"
