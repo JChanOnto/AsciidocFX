@@ -149,6 +149,25 @@ public class AsciidoctorFactory {
         return revealDoctor;
     }
 
+    /**
+     * True iff the non-HTML (PDF / DocBook) backend has finished
+     * initialising.  UI affordances like the PDF-preview pane's
+     * loading indicator poll this to decide whether to show a
+     * "warming up" hint before the user can trigger a render.
+     */
+    public static boolean isNonHtmlDoctorReady() {
+        return nonHtmlDoctorReady.getCount() == 0;
+    }
+
+    /**
+     * Block the caller until the non-HTML backend is initialised.
+     * Intended for off-FX-thread use (e.g., a virtual thread that
+     * clears a startup indicator once the PDF pipeline is warm).
+     */
+    public static void awaitNonHtmlDoctorReady() {
+        waitLatch(nonHtmlDoctorReady);
+    }
+
     public void initializeDoctors() {
         Thread.startVirtualThread(() -> {
             IntStream.rangeClosed(1, 4)

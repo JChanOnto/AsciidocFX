@@ -365,6 +365,23 @@ public class PdfPreviewPane extends ViewPanel {
 
             root.setTop(toolbar);
             root.setCenter(splitPane);
+
+            // Show the loading dots immediately on startup, before the
+            // user has even opened a file.  The asciidoctor JRuby
+            // backend warm-up takes several seconds on first launch;
+            // without this hold, a user who opens a .adoc during that
+            // window sees no visual feedback and assumes the app is
+            // hung.  We hold a single ref-count and release it from a
+            // virtual thread that blocks on the non-HTML doctor latch.
+            // After release, render() owns the indicator state.
+            setLoading(true);
+            Thread.startVirtualThread(() -> {
+                try {
+                    com.kodedu.service.AsciidoctorFactory.awaitNonHtmlDoctorReady();
+                } finally {
+                    setLoading(false);
+                }
+            });
         });
     }
 
@@ -490,16 +507,54 @@ public class PdfPreviewPane extends ViewPanel {
         );
     }
 
+    /**
+     * Reference-counted loading state.  Multiple concurrent reasons can
+     * "hold" the loading indicator (startup backend warm-up + an
+     * in-flight render, etc.); the dots stay visible until every reason
+     * has released.  Avoids the previous race where a startup-warmup
+     * release would clobber a render's still-pending visual.
+     */
+    private final java.util.concurrent.atomic.AtomicInteger loadingRefCount =
+            new java.util.concurrent.atomic.AtomicInteger(0);
+
     private void setLoading(boolean loading) {
+        int now = loading
+                ? loadingRefCount.incrementAndGet()
+                : Math.max(0, loadingRefCount.decrementAndGet());
+        boolean shouldShow = now > 0;
         Platform.runLater(() -> {
-            loadingDots.setVisible(loading);
-            loadingDots.setManaged(loading);
-            if (loading) {
+            if (loadingDots.isVisible() == shouldShow) {
+                return;
+            }
+            loadingDots.setVisible(shouldShow);
+            loadingDots.setManaged(shouldShow);
+            if (shouldShow) {
                 loadingTimeline.playFromStart();
             } else {
                 loadingTimeline.stop();
             }
         });
+    }
+
+    /**
+     * Public hold for the loading indicator.  Returns an
+     * {@link AutoCloseable} that releases the hold when closed —
+     * allowing callers like the Save\u2192PDF action to surface their
+     * own progress through the preview pane's prominent loading dots
+     * (the global thin {@code progressBar} bar is easy to miss).
+     *
+     * <p>Idempotent: calling {@code close()} more than once is a no-op
+     * after the first release.  Safe to call from any thread.
+     */
+    public AutoCloseable holdLoading() {
+        setLoading(true);
+        java.util.concurrent.atomic.AtomicBoolean released =
+                new java.util.concurrent.atomic.AtomicBoolean(false);
+        return () -> {
+            if (released.compareAndSet(false, true)) {
+                setLoading(false);
+            }
+        };
     }
 
     /**
