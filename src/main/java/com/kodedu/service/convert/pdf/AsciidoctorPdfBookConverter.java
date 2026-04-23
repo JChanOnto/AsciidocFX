@@ -58,26 +58,36 @@ public class AsciidoctorPdfBookConverter implements DocumentConverter<RenderResu
     @Override
     public void convert(boolean askPath, Consumer<RenderResult>... nextStep) {
 
+        // Resolve the save path, source, and baseDir on the caller
+        // thread (matches HtmlBookConverter / DocBookConverter).  Doing
+        // this inside the virtual-thread task breaks when spring-boot:run
+        // is the launcher: the forked JVM's virtual-thread context
+        // classloader fails to resolve project classes referenced for
+        // the first time inside the lambda, yielding
+        //   NoClassDefFoundError: com/kodedu/other/ExtensionFilters
+        // from an attempt to read ExtensionFilters.PDF in the task body.
+        // directoryService.getSaveOutputPath / current.currentEditorValue
+        // already handle FX-thread trips internally, so there's no
+        // reason to cross the virtual-thread boundary first.
+        final Path pdfPath = directoryService.getSaveOutputPath(ExtensionFilters.PDF, askPath);
+        final File destFile = pdfPath.toFile();
+
+        // Reuse the preview pane's master + scope resolution so
+        // Save->PDF matches "what you see is what you save".  Without
+        // this, Save on a chapter file fed the renderer the raw
+        // `== Chapter` fragment with the chapter's own folder as
+        // baseDir - so the saved PDF came out with no diagrams
+        // (`[{diagram}]` undefined), no screenshots (no :imagesdir:),
+        // and no theme, even though the preview rendered fine.
+        final java.util.Optional<com.kodedu.service.preview.PreviewSourceResolver.Resolved> resolved =
+                pdfPreviewPane.resolveCurrentRenderSource();
+
+        final String asciidoc = resolved.map(r -> r.source())
+                .orElseGet(current::currentEditorValue);
+        final Path workdir = resolved.map(r -> r.baseDir())
+                .orElseGet(() -> current.currentTab().getParentOrWorkdir());
+
         threadService.runTaskLater(() -> {
-
-            final Path pdfPath = directoryService.getSaveOutputPath(ExtensionFilters.PDF, askPath);
-
-            File destFile = pdfPath.toFile();
-
-            // Reuse the preview pane's master + scope resolution so
-            // Save->PDF matches "what you see is what you save".  Without
-            // this, Save on a chapter file fed the renderer the raw
-            // `== Chapter` fragment with the chapter's own folder as
-            // baseDir - so the saved PDF came out with no diagrams
-            // (`[{diagram}]` undefined), no screenshots (no :imagesdir:),
-            // and no theme, even though the preview rendered fine.
-            java.util.Optional<com.kodedu.service.preview.PreviewSourceResolver.Resolved> resolved =
-                    pdfPreviewPane.resolveCurrentRenderSource();
-
-            final String asciidoc = resolved.map(r -> r.source())
-                    .orElseGet(current::currentEditorValue);
-            final Path workdir = resolved.map(r -> r.baseDir())
-                    .orElseGet(() -> current.currentTab().getParentOrWorkdir());
 
             indikatorService.startProgressBar();
             // Also light up the PDF preview pane's loading dots: the
