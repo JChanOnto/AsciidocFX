@@ -96,6 +96,11 @@ jobs:
       # apt / choco). This step downloads the JavaFX SDK and bundles a portable
       # CRuby runtime into ruby-runtime/<os>/ so the install4j-package profile
       # picks it up and ships the fast native-Ruby PDF render path.
+      - name: Ensure shell scripts are executable (mac/linux)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: chmod +x scripts/*.sh scripts/internal/*.sh
+
       - name: Download JavaFX SDK + bundle CRuby runtime
         shell: bash
         run: ${{ matrix.setup_cmd }}
