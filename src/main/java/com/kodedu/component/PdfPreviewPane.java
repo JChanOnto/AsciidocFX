@@ -126,6 +126,52 @@ public class PdfPreviewPane extends ViewPanel {
     private final java.util.concurrent.atomic.AtomicInteger renderGeneration =
             new java.util.concurrent.atomic.AtomicInteger(0);
 
+    /**
+     * Pages above and below the visible viewport that we pre-render so
+     * scrolling reveals already-rendered pages without a placeholder
+     * flash.  Two pages either side covers ~one screen of fast scroll.
+     */
+    private static final int PREFETCH_RADIUS = 2;
+
+    /**
+     * Maximum number of rendered page Images to keep in memory at once.
+     * At 96 DPI a US-letter page is ~3-5 MB; capping at 24 keeps heap
+     * pressure bounded for 500-page books while comfortably covering
+     * any practical viewport + prefetch window.  Pages outside the
+     * window are evicted back to placeholders and re-rendered on
+     * demand if scrolled into view.
+     */
+    private static final int MAX_CACHED_PAGES = 24;
+
+    /**
+     * LRU access order for {@link #cachedImages}.  Page indices at the
+     * head are the least-recently used and first to be evicted when
+     * the cache exceeds {@link #MAX_CACHED_PAGES}.  Mutated only under
+     * {@code synchronized (cachedImages)}.
+     */
+    private final java.util.LinkedHashSet<Integer> lruOrder = new java.util.LinkedHashSet<>();
+
+    /**
+     * Page indices that have a render task in flight.  Prevents
+     * duplicate renders when the user scrolls back over a page whose
+     * first render has not yet landed.
+     */
+    private final java.util.Set<Integer> inFlightPages =
+            java.util.Collections.synchronizedSet(new java.util.HashSet<>());
+
+    /**
+     * Long-lived PDDocument handle so we don't pay the
+     * {@code Loader.loadPDF} cost per page-render request.  Reopened
+     * by {@link #rasterizeAndShow}; closed when superseded by a newer
+     * generation.  Mutated only on the render executor.
+     */
+    private PDDocument cachedPdfHandle;
+    private PDFRenderer cachedPdfRenderer;
+    private int cachedPdfHandleGen = -1;
+
+    /** Debounce timer for viewport-driven rasterise requests. */
+    private javafx.animation.PauseTransition viewportDebounce;
+
     /** A page outline entry extracted from the rendered PDF's bookmarks tree. */
     public record PdfOutlineEntry(String title, int pageIndex,
                                   java.util.List<PdfOutlineEntry> children) {}
@@ -236,6 +282,16 @@ public class PdfPreviewPane extends ViewPanel {
                     zoomDebounce.playFromStart();
                 }
             });
+
+            // Lazy-render trigger: any time the viewport moves or
+            // resizes, request the now-visible pages.  Debounced so a
+            // single drag of the scrollbar doesn't fire a request per
+            // pixel.  100ms is short enough to feel "as you scroll"
+            // and long enough to coalesce.
+            viewportDebounce = new javafx.animation.PauseTransition(Duration.millis(80));
+            viewportDebounce.setOnFinished(e -> requestVisiblePages());
+            scrollPane.vvalueProperty().addListener((obs, ov, nv) -> viewportDebounce.playFromStart());
+            scrollPane.viewportBoundsProperty().addListener((obs, ov, nv) -> viewportDebounce.playFromStart());
 
             buildLoadingDots();
             buildOutlineTree();
@@ -730,28 +786,40 @@ public class PdfPreviewPane extends ViewPanel {
     }
 
     /**
-     * Stream the PDF pages to the UI: render page-by-page on the
-     * executor, and replace each placeholder ImageView on the FX thread
-     * as soon as its raster is ready.  This means the user sees page 1
-     * within ~hundreds of milliseconds even on a 200-page book, rather
-     * than waiting for the whole document to rasterise before anything
-     * appears.
+     * Lazy viewport-driven render orchestrator.
      *
-     * <p>Each call increments {@link #renderGeneration}; in-flight tasks
-     * from a previous generation drop their results so they can't
-     * overwrite the new placeholders.
+     * <p>Phase 1 (cheap, sync on the executor): open the PDF, read
+     * page metadata + outline, close it.  Drives the placeholder
+     * layout and outline tree, both of which we want visible
+     * immediately.
+     *
+     * <p>Phase 2 (FX thread): build correctly-sized placeholders for
+     * every page.  Scrollbar is now accurate and the user can scroll
+     * before any pixels arrive.
+     *
+     * <p>Phase 3 (lazy): kick a single {@link #requestVisiblePages}
+     * call.  From this point on, page rasterisation is driven
+     * entirely by the viewport listener installed in
+     * {@link #afterViewInit} \u2014 we render only the pages the user
+     * is looking at, plus a small prefetch radius.  Pages outside the
+     * window are evicted from the image cache once it exceeds
+     * {@link #MAX_CACHED_PAGES} and re-rendered on demand.
+     *
+     * <p>A render-generation token discards in-flight tasks from a
+     * superseded render so a slow page from doc N-1 cannot land in
+     * doc N's layout.
      */
     private void rasterizeAndShow() {
         final int gen = renderGeneration.incrementAndGet();
         final double zoom = zoomSlider.getValue();
         final float dpi = (float) (BASE_DPI * zoom);
 
-        // Phase 1 (cheap): open the PDF, read page metadata + outline,
-        // close it.  This drives the placeholder layout and the outline
-        // tree, both of which we want visible immediately.
+        // Phase 1: load metadata + outline.  Close immediately; the
+        // long-lived handle is opened lazily on the first render
+        // request so we don't pay the open cost twice.
         List<Double> widths = new ArrayList<>();
         List<Double> heights = new ArrayList<>();
-        List<PdfOutlineEntry> outline = java.util.List.of();
+        List<PdfOutlineEntry> outline;
         int pageCount;
         try (PDDocument doc = Loader.loadPDF(tmpPdf.toFile())) {
             pageCount = doc.getNumberOfPages();
@@ -777,14 +845,14 @@ public class PdfPreviewPane extends ViewPanel {
             cachedImagesDpi = dpi;
             currentOutline.clear();
             currentOutline.addAll(outline);
+            lruOrder.clear();
         }
+        inFlightPages.clear();
+        closeCachedHandle(); // force reopen against the new tmpPdf
 
         publishOutline(outline);
 
-        // Phase 2: build placeholders on the FX thread sized to the
-        // page's PDF media box.  The user sees the correct document
-        // length and page positions instantly so the scrollbar is
-        // accurate before any pixel data lands.
+        // Phase 2: build placeholders.
         final List<Double> finalWidths = widths;
         final List<Double> finalHeights = heights;
         Platform.runLater(() -> {
@@ -794,104 +862,222 @@ public class PdfPreviewPane extends ViewPanel {
                 pagesBox.getChildren().add(
                         buildPlaceholder(finalWidths.get(i), finalHeights.get(i), zoom));
             }
+            // After the layout settles, ask for whichever pages are
+            // visible.  Defer to next pulse so the viewport bounds
+            // reflect the just-added placeholders.
+            Platform.runLater(this::requestVisiblePages);
         });
-
-        // Phase 3: stream-rasterise.  Render priority order:
-        //   visible page first (so the user sees what they were looking
-        //   at almost immediately on a reload / debounce / zoom-up),
-        //   then expand outward one page above and one below in
-        //   alternation, then fall through to any remaining pages.  On
-        //   a fresh open the visible page is page 0, so this naturally
-        //   degenerates to top-to-bottom.  A newer-generation token
-        //   abandons the loop the moment a fresh render is queued.
-        int anchor = currentVisiblePageIndex(pageCount);
-        java.util.List<Integer> order = priorityOrder(anchor, pageCount);
-
-        try (PDDocument doc = Loader.loadPDF(tmpPdf.toFile())) {
-            PDFRenderer renderer = new PDFRenderer(doc);
-            for (int i : order) {
-                if (gen != renderGeneration.get()) {
-                    return;
-                }
-                BufferedImage bim = renderer.renderImageWithDPI(i, dpi);
-                Image fxImg = SwingFXUtils.toFXImage(bim, null);
-                synchronized (cachedImages) {
-                    if (i < cachedImages.size()) cachedImages.set(i, fxImg);
-                }
-                final int idx = i;
-                Platform.runLater(() -> {
-                    if (gen != renderGeneration.get()) return;
-                    swapPlaceholder(idx, fxImg, zoom);
-                });
-            }
-        } catch (Exception e) {
-            logger.warn("PDF rasterize failed", e);
-        }
     }
 
     /**
-     * Best-effort estimate of the page index the user is currently
-     * looking at, derived from the {@link #scrollPane} scroll position
-     * and the cached page heights.  Falls back to 0 (top of document)
-     * when no pages have been laid out yet (i.e. fresh open) or when
-     * called off the FX thread before the layout settles.
-     *
-     * <p>Reading from a non-FX thread is safe-ish: {@code Vvalue} is a
-     * volatile-ish DoubleProperty; we tolerate a slightly stale value
-     * because the priority order is only an optimisation hint, not a
-     * correctness invariant.
+     * Compute the currently-visible page range and submit a render
+     * request for each page in that range (plus
+     * {@link #PREFETCH_RADIUS} either side) that is not already
+     * cached or in flight.  Called on the FX thread by the viewport
+     * listener and after every fresh render.
      */
-    private int currentVisiblePageIndex(int pageCount) {
-        if (pageCount <= 0) return 0;
-        double v;
-        try {
-            v = scrollPane.getVvalue();
-        } catch (Exception ignored) {
-            return 0;
-        }
-        // Vvalue ranges 0..1 across the scrollable region.  Estimate
-        // the corresponding page index by walking cumulative page
-        // heights at the current zoom until we cross the target Y.
+    private void requestVisiblePages() {
+        if (cachedPagePtHeights.isEmpty()) return;
+        final int gen = renderGeneration.get();
         double zoom = zoomSlider.getValue();
-        double total = 0.0;
         java.util.List<Double> heights;
         synchronized (cachedImages) {
-            heights = new java.util.ArrayList<>(cachedPagePtHeights);
+            heights = new ArrayList<>(cachedPagePtHeights);
         }
-        if (heights.isEmpty()) return 0;
-        for (Double h : heights) {
-            total += h * BASE_DPI / 72.0 * zoom + pagesBox.getSpacing();
+        double spacing = pagesBox.getSpacing();
+        double viewportH;
+        double scrollV;
+        try {
+            viewportH = scrollPane.getViewportBounds().getHeight();
+            scrollV = scrollPane.getVvalue();
+        } catch (Exception ignored) {
+            return;
         }
-        double targetY = v * total;
-        double cum = 0.0;
-        for (int i = 0; i < heights.size(); i++) {
-            cum += heights.get(i) * BASE_DPI / 72.0 * zoom + pagesBox.getSpacing();
-            if (cum >= targetY) {
-                return Math.min(i, pageCount - 1);
+        int[] range = visiblePageRange(heights, scrollV, viewportH, zoom, spacing,
+                BASE_DPI, PREFETCH_RADIUS);
+        int from = range[0];
+        int to = range[1];
+
+        // Submit render requests for pages in [from, to] missing an image.
+        for (int i = from; i <= to; i++) {
+            final int idx = i;
+            boolean needsRender;
+            synchronized (cachedImages) {
+                needsRender = idx < cachedImages.size() && cachedImages.get(idx) == null;
+                if (needsRender) {
+                    // Mark hot in LRU even before render lands; this
+                    // prevents an immediate-eviction race when the
+                    // window is exactly MAX_CACHED_PAGES wide.
+                    touchLru(idx);
+                }
             }
+            if (!needsRender) continue;
+            if (!inFlightPages.add(idx)) continue;
+            renderExecutor.submit(() -> renderSinglePage(idx, gen, zoom));
         }
-        return Math.min(pageCount - 1, Math.max(0, heights.size() - 1));
     }
 
     /**
-     * Build a render-priority order anchored at {@code anchor}: anchor
-     * first, then anchor-1, anchor+1, anchor-2, anchor+2, ...  Pages
-     * outside [0, pageCount) are skipped.  Returns a stable list whose
-     * size equals {@code pageCount}.
+     * Render a single page on the executor.  Uses the long-lived
+     * {@link #cachedPdfHandle} (re-opening if needed) so we don't pay
+     * the PDF-load cost per page.  Skips silently if a newer
+     * generation has superseded this request.
      */
-    static java.util.List<Integer> priorityOrder(int anchor, int pageCount) {
-        java.util.List<Integer> order = new java.util.ArrayList<>(pageCount);
-        if (pageCount <= 0) return order;
-        int a = Math.max(0, Math.min(pageCount - 1, anchor));
-        order.add(a);
-        for (int radius = 1; order.size() < pageCount; radius++) {
-            int below = a - radius;
-            int above = a + radius;
-            if (below >= 0) order.add(below);
-            if (above < pageCount) order.add(above);
-            if (below < 0 && above >= pageCount) break;
+    private void renderSinglePage(int pageIndex, int gen, double zoom) {
+        try {
+            if (gen != renderGeneration.get()) return;
+            PDFRenderer renderer = ensureCachedRenderer(gen);
+            if (renderer == null) return;
+            float dpi = (float) (BASE_DPI * zoom);
+            BufferedImage bim = renderer.renderImageWithDPI(pageIndex, dpi);
+            if (gen != renderGeneration.get()) return;
+            Image fxImg = SwingFXUtils.toFXImage(bim, null);
+            java.util.List<Integer> evicted;
+            synchronized (cachedImages) {
+                if (pageIndex >= cachedImages.size()) return;
+                cachedImages.set(pageIndex, fxImg);
+                touchLru(pageIndex);
+                evicted = evictExcess();
+            }
+            Platform.runLater(() -> {
+                if (gen != renderGeneration.get()) return;
+                swapPlaceholder(pageIndex, fxImg, zoom);
+                for (int e : evicted) {
+                    restorePlaceholder(e, zoom);
+                }
+            });
+        } catch (Exception e) {
+            logger.debug("Single-page render failed for page {}", pageIndex, e);
+        } finally {
+            inFlightPages.remove(pageIndex);
         }
-        return order;
+    }
+
+    /**
+     * Reopen the long-lived PDDocument if the cached handle belongs
+     * to a stale generation (or hasn't been opened yet).  Returns the
+     * renderer for the current generation, or {@code null} if open
+     * failed or the generation has already moved on.
+     *
+     * <p>Called only from the render executor so single-thread
+     * serialisation is implicit.
+     */
+    private synchronized PDFRenderer ensureCachedRenderer(int gen) {
+        if (gen != renderGeneration.get()) return null;
+        if (cachedPdfHandle != null && cachedPdfHandleGen == gen) {
+            return cachedPdfRenderer;
+        }
+        closeCachedHandle();
+        try {
+            cachedPdfHandle = Loader.loadPDF(tmpPdf.toFile());
+            cachedPdfRenderer = new PDFRenderer(cachedPdfHandle);
+            cachedPdfHandleGen = gen;
+            return cachedPdfRenderer;
+        } catch (Exception e) {
+            logger.warn("PDF handle reopen failed", e);
+            return null;
+        }
+    }
+
+    private synchronized void closeCachedHandle() {
+        if (cachedPdfHandle != null) {
+            try { cachedPdfHandle.close(); } catch (Exception ignored) { }
+            cachedPdfHandle = null;
+            cachedPdfRenderer = null;
+            cachedPdfHandleGen = -1;
+        }
+    }
+
+    /** Mark {@code pageIndex} as most-recently used. */
+    private void touchLru(int pageIndex) {
+        lruOrder.remove(pageIndex);
+        lruOrder.add(pageIndex);
+    }
+
+    /**
+     * Drop least-recently-used cached images until we are at or below
+     * {@link #MAX_CACHED_PAGES}.  Returns the page indices that were
+     * evicted so the caller can restore their placeholders on the FX
+     * thread.  Must be called under {@code synchronized (cachedImages)}.
+     */
+    private java.util.List<Integer> evictExcess() {
+        java.util.List<Integer> evicted = new ArrayList<>();
+        java.util.Iterator<Integer> it = lruOrder.iterator();
+        while (lruOrder.size() > MAX_CACHED_PAGES && it.hasNext()) {
+            int idx = it.next();
+            it.remove();
+            if (idx < cachedImages.size() && cachedImages.get(idx) != null) {
+                cachedImages.set(idx, null);
+                evicted.add(idx);
+            }
+        }
+        return evicted;
+    }
+
+    /**
+     * Replace the rendered ImageView at {@code idx} with a
+     * placeholder so the layout keeps the page slot at its correct
+     * pixel size after eviction.  No-op if the index is out of range
+     * or already shows a placeholder.
+     */
+    private void restorePlaceholder(int idx, double zoom) {
+        if (idx < 0 || idx >= pagesBox.getChildren().size()) return;
+        if (idx >= cachedPagePtWidths.size() || idx >= cachedPagePtHeights.size()) return;
+        javafx.scene.Node existing = pagesBox.getChildren().get(idx);
+        if (!(existing instanceof ImageView)) return;
+        pagesBox.getChildren().set(idx,
+                buildPlaceholder(cachedPagePtWidths.get(idx),
+                        cachedPagePtHeights.get(idx), zoom));
+    }
+
+    /**
+     * Pure helper: compute the inclusive [from, to] page index range
+     * of pages currently intersecting the viewport, expanded by
+     * {@code prefetch} pages either side and clamped to
+     * {@code [0, pageCount)}.
+     *
+     * <p>Walks cumulative page heights ({@code heightPt * baseDpi/72 * zoom}
+     * + spacing) until the running total crosses the viewport's top
+     * and bottom edges in the scrollable region.
+     *
+     * <p>Visible-for-test (package-private) so the algorithm can be
+     * pinned without spinning up a JavaFX toolkit.
+     */
+    static int[] visiblePageRange(java.util.List<Double> pagePtHeights,
+                                  double scrollV, double viewportH,
+                                  double zoom, double spacing,
+                                  double baseDpi, int prefetch) {
+        int n = pagePtHeights.size();
+        if (n == 0) return new int[] {0, -1};
+        // Cumulative pixel offsets [0..n], pageTops[i] = top of page i.
+        double[] pageTops = new double[n + 1];
+        for (int i = 0; i < n; i++) {
+            double h = pagePtHeights.get(i) * baseDpi / 72.0 * zoom;
+            pageTops[i + 1] = pageTops[i] + h + spacing;
+        }
+        double total = pageTops[n];
+        double scrollable = Math.max(1.0, total - viewportH);
+        double topY = Math.max(0.0, Math.min(scrollable, scrollV * scrollable));
+        double bottomY = topY + Math.max(viewportH, 1.0);
+
+        int from = 0;
+        for (int i = 0; i < n; i++) {
+            if (pageTops[i + 1] >= topY) { from = i; break; }
+            from = i + 1;
+        }
+        int to = n - 1;
+        for (int i = from; i < n; i++) {
+            if (pageTops[i] >= bottomY) { to = i - 1; break; }
+            to = i;
+        }
+        from = Math.max(0, from - prefetch);
+        to = Math.min(n - 1, to + prefetch);
+        if (from > to) {
+            // Degenerate (e.g. zero viewport): at least include the first.
+            from = Math.max(0, Math.min(n - 1, from));
+            to = from;
+        }
+        return new int[] {from, to};
     }
 
     /**
@@ -978,37 +1164,6 @@ public class PdfPreviewPane extends ViewPanel {
     }
 
     /**
-     * Replace the page nodes with ImageViews sized for the requested zoom
-     * level.  Used by re-rasterise (zoom-up sharper rerender); the
-     * underlying pixel data is the size {@link #cachedImagesDpi} was
-     * rendered at, but the displayed size is
-     * {@code pageWidthPt * zoom} (1 PDF pt = 1/72 inch).
-     */
-    private void populatePagesBox(double zoom) {
-        synchronized (cachedImages) {
-            pagesBox.getChildren().clear();
-            for (int i = 0; i < cachedImages.size(); i++) {
-                Image img = cachedImages.get(i);
-                if (img == null) {
-                    double wPt = i < cachedPagePtWidths.size() ? cachedPagePtWidths.get(i) : 612;
-                    double hPt = i < cachedPagePtHeights.size() ? cachedPagePtHeights.get(i) : 792;
-                    pagesBox.getChildren().add(buildPlaceholder(wPt, hPt, zoom));
-                    continue;
-                }
-                ImageView view = new ImageView(img);
-                view.setPreserveRatio(true);
-                if (i < cachedPagePtWidths.size()) {
-                    double targetPx = cachedPagePtWidths.get(i) * BASE_DPI / 72.0 * zoom;
-                    view.setFitWidth(targetPx);
-                    view.setSmooth(true);
-                    view.setCache(true);
-                }
-                pagesBox.getChildren().add(view);
-            }
-        }
-    }
-
-    /**
      * O(n) walk over the displayed ImageViews adjusting their
      * {@code fitWidth} for the new zoom.  No PDFBox calls, no I/O —
      * this is what keeps the slider responsive while the user drags.
@@ -1043,6 +1198,12 @@ public class PdfPreviewPane extends ViewPanel {
      * DPI we already rasterised at (downscale is sharp; upscale beyond
      * the cached DPI is blurry and warrants a fresh render).  Also
      * coalesces concurrent calls via {@link #reraserizing}.
+     *
+     * <p>Zoom-up is now cheap because we only ever re-render the
+     * cached (visible-window) pages, not the whole document.  We
+     * invalidate the cached images and let
+     * {@link #requestVisiblePages} populate them lazily as the user
+     * scrolls.
      */
     private void rerasterizeIfQualityWouldImprove() {
         try {
@@ -1062,7 +1223,31 @@ public class PdfPreviewPane extends ViewPanel {
         }
         renderExecutor.submit(() -> {
             try {
-                rasterizeAndShow();
+                final int gen = renderGeneration.incrementAndGet();
+                final double zoom = zoomSlider.getValue();
+                synchronized (cachedImages) {
+                    for (int i = 0; i < cachedImages.size(); i++) {
+                        cachedImages.set(i, null);
+                    }
+                    lruOrder.clear();
+                    cachedImagesDpi = (float) (BASE_DPI * zoom);
+                }
+                inFlightPages.clear();
+                closeCachedHandle();
+                Platform.runLater(() -> {
+                    if (gen != renderGeneration.get()) return;
+                    // Replace every node with a placeholder sized for
+                    // the new zoom; the viewport listener will drive
+                    // re-render of whatever is in view.
+                    int n = pagesBox.getChildren().size();
+                    for (int i = 0; i < n && i < cachedPagePtWidths.size()
+                            && i < cachedPagePtHeights.size(); i++) {
+                        pagesBox.getChildren().set(i,
+                                buildPlaceholder(cachedPagePtWidths.get(i),
+                                        cachedPagePtHeights.get(i), zoom));
+                    }
+                    requestVisiblePages();
+                });
             } finally {
                 reraserizing.set(false);
             }
