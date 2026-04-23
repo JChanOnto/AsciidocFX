@@ -253,6 +253,9 @@ public class PdfPreviewPane extends ViewPanel {
 
             // Ctrl + scroll wheel zooms the preview, swallowing the event so
             // the page doesn't also scroll. Step matches the +/- buttons.
+            // Zoom is anchored to the cursor: the document point under the
+            // mouse stays under the mouse after the zoom change (matches
+            // every common PDF viewer's wheel-zoom behaviour).
             scrollPane.addEventFilter(javafx.scene.input.ScrollEvent.SCROLL, ev -> {
                 if (!ev.isControlDown()) {
                     return;
@@ -262,7 +265,7 @@ public class PdfPreviewPane extends ViewPanel {
                 double next = Math.max(zoomSlider.getMin(),
                         Math.min(zoomSlider.getMax(), zoomSlider.getValue() + delta));
                 if (Math.abs(next - zoomSlider.getValue()) > 0.0001) {
-                    zoomSlider.setValue(next);
+                    zoomAroundScenePoint(next, ev.getSceneX(), ev.getSceneY());
                 }
                 ev.consume();
             });
@@ -317,13 +320,13 @@ public class PdfPreviewPane extends ViewPanel {
             Button zoomOutButton = new Button("\u2212");
             zoomOutButton.setTooltip(new javafx.scene.control.Tooltip(
                     "Zoom out (Ctrl + scroll down)"));
-            zoomOutButton.setOnAction(e -> zoomSlider.setValue(
+            zoomOutButton.setOnAction(e -> zoomAroundViewportCenter(
                     Math.max(zoomSlider.getMin(),
                             zoomSlider.getValue() - zoomSlider.getBlockIncrement())));
             Button zoomInButton = new Button("+");
             zoomInButton.setTooltip(new javafx.scene.control.Tooltip(
                     "Zoom in (Ctrl + scroll up)"));
-            zoomInButton.setOnAction(e -> zoomSlider.setValue(
+            zoomInButton.setOnAction(e -> zoomAroundViewportCenter(
                     Math.min(zoomSlider.getMax(),
                             zoomSlider.getValue() + zoomSlider.getBlockIncrement())));
             HBox zoomGroup = new HBox(4, zoomOutButton, zoomSlider, zoomInButton);
@@ -1316,6 +1319,113 @@ public class PdfPreviewPane extends ViewPanel {
                 }
             }
         }
+    }
+
+    /**
+     * Zoom to {@code newZoom}, keeping the document point under the
+     * mouse stationary.  Matches the cursor-anchored wheel-zoom in
+     * Acrobat, browser PDF viewers, etc. - without this, every zoom
+     * step shifts the visible page up or down because the ScrollPane
+     * preserves the {@code [0,1]} hvalue/vvalue ratio rather than the
+     * absolute pixel under the cursor.
+     *
+     * <p>Algorithm:
+     * <ol>
+     *   <li>Convert the cursor's scene coords to the {@code pagesBox}
+     *       content's local coords at the OLD zoom.</li>
+     *   <li>Apply the zoom (which rescales every ImageView and re-lays
+     *       out the VBox).</li>
+     *   <li>Force a synchronous layout pass so the new content size is
+     *       known.</li>
+     *   <li>Compute the new content coords for the same document point
+     *       (multiply by newZoom/oldZoom), then back-solve the
+     *       hvalue/vvalue that places that point at the cursor's
+     *       viewport offset.</li>
+     * </ol>
+     */
+    private void zoomAroundScenePoint(double newZoom, double sceneX, double sceneY) {
+        double oldZoom = zoomSlider.getValue();
+        if (Math.abs(newZoom - oldZoom) < 0.0001) {
+            return;
+        }
+        // Cursor in pagesBox-local coords at OLD zoom (the "document point").
+        javafx.geometry.Point2D contentPoint = pagesBox.sceneToLocal(sceneX, sceneY);
+        // Cursor offset within the visible viewport (pixels from the
+        // viewport's top-left).  This is what we'll preserve.
+        javafx.geometry.Bounds vpBoundsScene = scrollPane.localToScene(
+                scrollPane.getViewportBounds());
+        double cursorVpX = sceneX - vpBoundsScene.getMinX();
+        double cursorVpY = sceneY - vpBoundsScene.getMinY();
+
+        zoomSlider.setValue(newZoom); // fires rescaleViewsInstantly + debounce
+
+        // Force layout so the new content size is committed before we
+        // sample contentBounds and viewportBounds.
+        pagesBox.applyCss();
+        pagesBox.layout();
+        scrollPane.applyCss();
+        scrollPane.layout();
+
+        applyZoomAnchor(contentPoint, oldZoom, newZoom, cursorVpX, cursorVpY);
+    }
+
+    /**
+     * Variant of {@link #zoomAroundScenePoint} for the +/- toolbar
+     * buttons: anchor to the centre of the viewport so pages don't
+     * jump when the user clicks the buttons.
+     */
+    private void zoomAroundViewportCenter(double newZoom) {
+        double oldZoom = zoomSlider.getValue();
+        if (Math.abs(newZoom - oldZoom) < 0.0001) {
+            return;
+        }
+        javafx.geometry.Bounds vpBoundsScene = scrollPane.localToScene(
+                scrollPane.getViewportBounds());
+        double sceneX = vpBoundsScene.getMinX() + vpBoundsScene.getWidth() / 2.0;
+        double sceneY = vpBoundsScene.getMinY() + vpBoundsScene.getHeight() / 2.0;
+        zoomAroundScenePoint(newZoom, sceneX, sceneY);
+    }
+
+    /**
+     * Compute and apply the hvalue/vvalue that puts {@code contentPoint *
+     * (newZoom/oldZoom)} at the same viewport offset
+     * {@code (cursorVpX, cursorVpY)} the cursor was at before the zoom.
+     *
+     * <p>JavaFX ScrollPane convention: {@code hvalue} maps linearly
+     * from {@code hmin} (content's left edge at viewport's left) to
+     * {@code hmax} (content's right edge at viewport's right).  So the
+     * scrollable range is {@code contentWidth - viewportWidth}; setting
+     * hvalue selects the fraction of that range that's scrolled past.
+     */
+    private void applyZoomAnchor(javafx.geometry.Point2D contentPointAtOldZoom,
+                                 double oldZoom, double newZoom,
+                                 double cursorVpX, double cursorVpY) {
+        javafx.geometry.Bounds vp = scrollPane.getViewportBounds();
+        javafx.geometry.Bounds content = pagesBox.getLayoutBounds();
+        double scale = newZoom / oldZoom;
+        double targetContentX = contentPointAtOldZoom.getX() * scale;
+        double targetContentY = contentPointAtOldZoom.getY() * scale;
+
+        double scrollableX = content.getWidth() - vp.getWidth();
+        if (scrollableX > 0) {
+            double newScrollX = targetContentX - cursorVpX;
+            double hMin = scrollPane.getHmin();
+            double hMax = scrollPane.getHmax();
+            double h = hMin + (hMax - hMin) * clamp(newScrollX / scrollableX, 0, 1);
+            scrollPane.setHvalue(h);
+        }
+        double scrollableY = content.getHeight() - vp.getHeight();
+        if (scrollableY > 0) {
+            double newScrollY = targetContentY - cursorVpY;
+            double vMin = scrollPane.getVmin();
+            double vMax = scrollPane.getVmax();
+            double v = vMin + (vMax - vMin) * clamp(newScrollY / scrollableY, 0, 1);
+            scrollPane.setVvalue(v);
+        }
+    }
+
+    private static double clamp(double v, double lo, double hi) {
+        return Math.max(lo, Math.min(hi, v));
     }
 
     /**
