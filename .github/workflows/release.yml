@@ -176,7 +176,7 @@ jobs:
           tag_name: ${{ steps.tag.outputs.name }}
           name: ${{ steps.tag.outputs.name }}
           body_path: RELEASE_NOTES.md
-          draft: true
+          draft: false
           prerelease: false
           fail_on_unmatched_files: true
           files: dist/*.zip
