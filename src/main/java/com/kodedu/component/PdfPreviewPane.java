@@ -95,6 +95,27 @@ public class PdfPreviewPane extends ViewPanel {
     private volatile int lastRenderHash;
 
     /**
+     * Cache of page images at the DPI they were rasterised at, keyed by
+     * page index.  Zoom changes repaint by rescaling these images via
+     * {@link ImageView#setFitWidth(double)} on the FX thread (microsecond
+     * cost) and only kick off a heavy re-rasterisation if the new zoom
+     * exceeds the cached DPI's natural pixel-per-point ratio (i.e. we
+     * would visibly blur).  A debounced re-rasterise then runs on the
+     * render executor so dragging the slider doesn't queue dozens of
+     * PDFBox loads.
+     */
+    private final List<Image> cachedImages = new ArrayList<>();
+    /** DPI the {@link #cachedImages} were rendered at. */
+    private volatile float cachedImagesDpi = BASE_DPI;
+    /** Page widths in PDF points, used to scale ImageViews instantly on zoom. */
+    private final List<Double> cachedPagePtWidths = new ArrayList<>();
+    /** Debounce timer for the heavy re-rasterise. Run on FX thread. */
+    private javafx.animation.PauseTransition zoomDebounce;
+    /** Tracks whether a re-rasterise is currently in flight on the executor. */
+    private final java.util.concurrent.atomic.AtomicBoolean reraserizing =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+
+    /**
      * User's explicit master choice for an ambiguous chapter.  Keyed by
      * the chapter's normalised absolute path so we only show the
      * disambiguation dialog once per chapter per session.  Cleared if the
@@ -181,9 +202,16 @@ public class PdfPreviewPane extends ViewPanel {
             zoomSlider.setPrefWidth(140);
             zoomSlider.setShowTickMarks(true);
             zoomSlider.setBlockIncrement(0.1);
+            // Debounce the heavy PDFBox re-rasterise so dragging the slider
+            // doesn't queue a load+render per tick.  The lightweight
+            // ImageView rescale (instant) runs on every change for
+            // responsive feedback.
+            zoomDebounce = new javafx.animation.PauseTransition(Duration.millis(220));
+            zoomDebounce.setOnFinished(e -> rerasterizeIfQualityWouldImprove());
             zoomSlider.valueProperty().addListener((obs, ov, nv) -> {
                 if (Math.abs(nv.doubleValue() - ov.doubleValue()) > 0.001) {
-                    rerasterizeAtCurrentZoom();
+                    rescaleViewsInstantly(nv.doubleValue());
+                    zoomDebounce.playFromStart();
                 }
             });
 
@@ -567,19 +595,75 @@ public class PdfPreviewPane extends ViewPanel {
     }
 
     private void rasterizeAndShow() {
-        float dpi = (float) (BASE_DPI * zoomSlider.getValue());
-        List<Image> images = rasterizePages(dpi);
-        Platform.runLater(() -> {
-            pagesBox.getChildren().clear();
-            for (Image img : images) {
-                ImageView view = new ImageView(img);
-                view.setPreserveRatio(true);
-                pagesBox.getChildren().add(view);
-            }
-        });
+        double zoom = zoomSlider.getValue();
+        float dpi = (float) (BASE_DPI * zoom);
+        RasterizeResult res = rasterizePages(dpi);
+        synchronized (cachedImages) {
+            cachedImages.clear();
+            cachedImages.addAll(res.images);
+            cachedPagePtWidths.clear();
+            cachedPagePtWidths.addAll(res.pageWidthsPt);
+            cachedImagesDpi = dpi;
+        }
+        Platform.runLater(() -> populatePagesBox(zoom));
     }
 
-    private void rerasterizeAtCurrentZoom() {
+    /**
+     * Replace the page nodes with ImageViews sized for the requested zoom
+     * level.  Uses the cached images; the underlying pixel data is the
+     * size {@link #cachedImagesDpi} was rendered at, but the displayed
+     * size is {@code pageWidthPt * zoom} (1 PDF pt = 1/72 inch, ImageView
+     * units are device pixels at 96 dpi, and {@link #BASE_DPI} = 96 so
+     * {@code displayPx = ptWidth * BASE_DPI / 72 * zoom}).
+     */
+    private void populatePagesBox(double zoom) {
+        synchronized (cachedImages) {
+            pagesBox.getChildren().clear();
+            for (int i = 0; i < cachedImages.size(); i++) {
+                ImageView view = new ImageView(cachedImages.get(i));
+                view.setPreserveRatio(true);
+                if (i < cachedPagePtWidths.size()) {
+                    double targetPx = cachedPagePtWidths.get(i) * BASE_DPI / 72.0 * zoom;
+                    view.setFitWidth(targetPx);
+                    // Smooth interpolation when downscaling (zoom < cached);
+                    // disabled when upscaling so the user sees the
+                    // native pixel grid until the re-rasterise lands.
+                    view.setSmooth(true);
+                    view.setCache(true);
+                }
+                pagesBox.getChildren().add(view);
+            }
+        }
+    }
+
+    /**
+     * O(n) walk over the displayed ImageViews adjusting their
+     * {@code fitWidth} for the new zoom.  No PDFBox calls, no I/O —
+     * this is what keeps the slider responsive while the user drags.
+     */
+    private void rescaleViewsInstantly(double zoom) {
+        synchronized (cachedImages) {
+            if (cachedPagePtWidths.isEmpty()) {
+                return;
+            }
+            int n = pagesBox.getChildren().size();
+            for (int i = 0; i < n && i < cachedPagePtWidths.size(); i++) {
+                javafx.scene.Node node = pagesBox.getChildren().get(i);
+                if (node instanceof ImageView iv) {
+                    iv.setFitWidth(cachedPagePtWidths.get(i) * BASE_DPI / 72.0 * zoom);
+                }
+            }
+        }
+    }
+
+    /**
+     * Kick off a re-rasterise only if the new zoom level would benefit
+     * visibly from sharper pixels.  Specifically: skip when zoom <= the
+     * DPI we already rasterised at (downscale is sharp; upscale beyond
+     * the cached DPI is blurry and warrants a fresh render).  Also
+     * coalesces concurrent calls via {@link #reraserizing}.
+     */
+    private void rerasterizeIfQualityWouldImprove() {
         try {
             if (Files.size(tmpPdf) == 0) {
                 return;
@@ -587,22 +671,41 @@ public class PdfPreviewPane extends ViewPanel {
         } catch (Exception ignored) {
             return;
         }
-        renderExecutor.submit(this::rasterizeAndShow);
+        float wantDpi = (float) (BASE_DPI * zoomSlider.getValue());
+        // Allow a small slack so 1.0 -> 1.05 doesn't trigger a re-render.
+        if (wantDpi <= cachedImagesDpi * 1.05f) {
+            return;
+        }
+        if (!reraserizing.compareAndSet(false, true)) {
+            return;
+        }
+        renderExecutor.submit(() -> {
+            try {
+                rasterizeAndShow();
+            } finally {
+                reraserizing.set(false);
+            }
+        });
     }
 
-    private List<Image> rasterizePages(float dpi) {
+    /** Result bundle so {@link #rasterizePages} can return both the images and their PDF page widths. */
+    private record RasterizeResult(List<Image> images, List<Double> pageWidthsPt) {}
+
+    private RasterizeResult rasterizePages(float dpi) {
         List<Image> images = new ArrayList<>();
+        List<Double> widths = new ArrayList<>();
         try (PDDocument doc = Loader.loadPDF(tmpPdf.toFile())) {
             PDFRenderer renderer = new PDFRenderer(doc);
             int n = doc.getNumberOfPages();
             for (int i = 0; i < n; i++) {
                 BufferedImage bim = renderer.renderImageWithDPI(i, dpi);
                 images.add(SwingFXUtils.toFXImage(bim, null));
+                widths.add((double) doc.getPage(i).getMediaBox().getWidth());
             }
         } catch (Exception e) {
             logger.warn("PDF rasterize failed", e);
         }
-        return images;
+        return new RasterizeResult(images, widths);
     }
 
     @Override

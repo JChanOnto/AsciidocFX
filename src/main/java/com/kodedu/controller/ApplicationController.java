@@ -821,8 +821,14 @@ public class ApplicationController extends TextWebSocketHandler implements Initi
                     }
                     javafx.scene.control.Label name =
                             new javafx.scene.control.Label(item.toString());
-                    javafx.scene.layout.Region spacer = new javafx.scene.layout.Region();
-                    javafx.scene.layout.HBox.setHgrow(spacer,
+                    // Filename label grows to fill the row; if the name
+                    // is longer than the row, JavaFX truncates with the
+                    // default ellipsis instead of pushing the MASTER
+                    // badge off the right edge.  This is the whole point
+                    // of HGROW=ALWAYS + maxWidth=MAX_VALUE on a Label.
+                    name.setMaxWidth(Double.MAX_VALUE);
+                    name.setMinWidth(0);
+                    javafx.scene.layout.HBox.setHgrow(name,
                             javafx.scene.layout.Priority.ALWAYS);
                     javafx.scene.control.Label badge =
                             new javafx.scene.control.Label("MASTER");
@@ -833,10 +839,20 @@ public class ApplicationController extends TextWebSocketHandler implements Initi
                             "-fx-font-weight: bold;" +
                             "-fx-padding: 1 5 1 5;" +
                             "-fx-background-radius: 3;");
+                    // Don't let the badge get squeezed; it is always
+                    // small and must remain fully visible.
+                    badge.setMinWidth(javafx.scene.layout.Region.USE_PREF_SIZE);
                     javafx.scene.layout.HBox row =
-                            new javafx.scene.layout.HBox(6, name, spacer, badge);
+                            new javafx.scene.layout.HBox(6, name, badge);
                     row.setAlignment(javafx.geometry.Pos.CENTER_LEFT);
-                    row.setMaxWidth(Double.MAX_VALUE);
+                    // Bind the row width to the cell so the name label's
+                    // grow region knows where to stop and trigger
+                    // ellipsis.  Without this the HBox would be sized
+                    // to its preferred (text + badge) width and the
+                    // badge would scroll out with the name.
+                    row.prefWidthProperty().bind(
+                            widthProperty().subtract(20));
+                    row.setMaxWidth(javafx.scene.layout.Region.USE_PREF_SIZE);
                     setText(null);
                     setGraphic(row);
                     setContentDisplay(javafx.scene.control.ContentDisplay.GRAPHIC_ONLY);
