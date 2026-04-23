@@ -1322,33 +1322,86 @@ public class PdfPreviewPane extends ViewPanel {
     }
 
     /**
+     * Pure helper: compute the {@code (hvalue, vvalue)} that anchors
+     * a content-local point at a viewport offset after a zoom change.
+     * Extracted from {@link #zoomAroundScenePoint} so the math can be
+     * unit-tested without spinning up a JavaFX scene.
+     *
+     * <p>JavaFX ScrollPane convention: the value maps linearly from
+     * {@code min} (content edge at viewport edge, scroll = 0) to
+     * {@code max} (content opposite edge at viewport opposite edge,
+     * scroll = contentSize - viewportSize).  When the content is
+     * shorter than the viewport (scrollable range &le; 0) we keep
+     * the existing value rather than dividing by zero.
+     */
+    static ZoomAnchor computeZoomAnchor(
+            double anchorContentX, double anchorContentY,
+            double cursorVpX, double cursorVpY,
+            double oldZoom, double newZoom,
+            double oldContentW, double oldContentH,
+            double viewportW, double viewportH,
+            double currentH, double currentV,
+            double hMin, double hMax, double vMin, double vMax) {
+        double scale = newZoom / oldZoom;
+        double newContentW = oldContentW * scale;
+        double newContentH = oldContentH * scale;
+        double targetContentX = anchorContentX * scale;
+        double targetContentY = anchorContentY * scale;
+
+        double newH = currentH;
+        double scrollableX = newContentW - viewportW;
+        if (scrollableX > 0) {
+            double newScrollX = targetContentX - cursorVpX;
+            newH = hMin + (hMax - hMin) * clamp(newScrollX / scrollableX, 0, 1);
+        }
+        double newV = currentV;
+        double scrollableY = newContentH - viewportH;
+        if (scrollableY > 0) {
+            double newScrollY = targetContentY - cursorVpY;
+            newV = vMin + (vMax - vMin) * clamp(newScrollY / scrollableY, 0, 1);
+        }
+        return new ZoomAnchor(newH, newV);
+    }
+
+    /** Result of {@link #computeZoomAnchor}: target hvalue / vvalue
+     *  for the ScrollPane after a zoom step. */
+    static record ZoomAnchor(double hvalue, double vvalue) {}
+
+    /**
      * Zoom to {@code newZoom}, keeping the document point under the
      * mouse stationary.  Matches the cursor-anchored wheel-zoom in
-     * Acrobat, browser PDF viewers, etc. - without this, every zoom
-     * step shifts the visible page up or down because the ScrollPane
-     * preserves the {@code [0,1]} hvalue/vvalue ratio rather than the
-     * absolute pixel under the cursor.
+     * Acrobat, browser PDF viewers, etc.
      *
-     * <p>Algorithm:
-     * <ol>
-     *   <li>Capture the cursor's content-local coords AND the current
-     *       content/viewport sizes BEFORE the zoom change.</li>
-     *   <li>Capture the cursor's offset within the visible viewport.</li>
-     *   <li>Apply the zoom (which rescales every ImageView and re-lays
-     *       out the VBox).</li>
-     *   <li>Compute the NEW content size analytically as
-     *       {@code oldContentSize * (newZoom/oldZoom)}.  We do NOT
-     *       trust {@code pagesBox.getLayoutBounds()} after the zoom -
-     *       a synchronous {@code applyCss/layout} pass does not
-     *       reliably propagate the new size through ScrollPane's
-     *       content-sizing path on the same pulse, so reads of
-     *       {@code getLayoutBounds()} can return the OLD dimensions.
-     *       That used to clamp the computed scroll ratio to 0 and
-     *       snap the view to page 1.</li>
-     *   <li>Back-solve hvalue/vvalue to put
-     *       {@code contentPoint*(newZoom/oldZoom)} at the original
-     *       viewport offset.</li>
-     * </ol>
+     * <p><b>Why we force a synchronous layout pulse before setting
+     * hvalue/vvalue.</b>  Setting {@code zoomSlider} fires
+     * {@link #rescaleViewsInstantly} which mutates each
+     * {@code ImageView.fitWidth}, but ScrollPane's internal
+     * viewport/content sizing model is only updated when a layout
+     * pulse runs.  If we then set the scroll values:
+     *
+     * <ul>
+     *   <li><b>Synchronously, without forcing layout:</b> ScrollPane
+     *       records the value, but on the next pulse re-clamps it
+     *       against the OLD content size (treating the value as
+     *       "preserve scroll pixels"), snapping the view away from
+     *       where we want it.</li>
+     *   <li><b>Via {@link Platform#runLater}:</b> the runLater task
+     *       runs after the pulse, but ScrollPane has already done
+     *       its preserve-scroll-pixels clamp; our
+     *       {@code setVvalue(target)} is silently overridden by a
+     *       subsequent internal recomputation back to the
+     *       preserved-pixel vvalue.  This is the bug commits
+     *       34abda6f and 93035243 failed to fix.</li>
+     *   <li><b>Force layout, then set value synchronously:</b>
+     *       {@code applyCss() + layout()} on {@code pagesBox} and
+     *       {@code scrollPane} propagates the new content size into
+     *       ScrollPane's sizing model immediately, so our
+     *       {@code setVvalue(target)} is interpreted against the
+     *       NEW content and is not subsequently overridden.  This
+     *       is the only approach that actually anchors the cursor;
+     *       see {@code PdfPreviewPaneZoomIntegrationTest.diagnoseApplyStrategies}
+     *       for the empirical comparison.</li>
+     * </ul>
      */
     private void zoomAroundScenePoint(double newZoom, double sceneX, double sceneY) {
         double oldZoom = zoomSlider.getValue();
@@ -1366,12 +1419,43 @@ public class PdfPreviewPane extends ViewPanel {
         javafx.geometry.Bounds vp = scrollPane.getViewportBounds();
         double oldContentW = oldContent.getWidth();
         double oldContentH = oldContent.getHeight();
+        double currentH = scrollPane.getHvalue();
+        double currentV = scrollPane.getVvalue();
+
+        ZoomAnchor anchor = computeZoomAnchor(
+                contentPoint.getX(), contentPoint.getY(),
+                cursorVpX, cursorVpY,
+                oldZoom, newZoom,
+                oldContentW, oldContentH,
+                vp.getWidth(), vp.getHeight(),
+                currentH, currentV,
+                scrollPane.getHmin(), scrollPane.getHmax(),
+                scrollPane.getVmin(), scrollPane.getVmax());
+
+        logger.debug("zoom anchor: {} -> {}  cursorVp=({},{})  contentPt=({},{})"
+                + "  oldContent=({}x{})  vp=({}x{})  curH={} curV={}  newH={} newV={}",
+                oldZoom, newZoom,
+                cursorVpX, cursorVpY,
+                contentPoint.getX(), contentPoint.getY(),
+                oldContentW, oldContentH,
+                vp.getWidth(), vp.getHeight(),
+                currentH, currentV,
+                anchor.hvalue(), anchor.vvalue());
 
         zoomSlider.setValue(newZoom); // fires rescaleViewsInstantly + debounce
-
-        applyZoomAnchor(contentPoint, oldZoom, newZoom,
-                cursorVpX, cursorVpY,
-                oldContentW, oldContentH, vp);
+        // Force the new content size into the ScrollPane's sizing
+        // model NOW so our setHvalue/setVvalue is interpreted against
+        // it (see javadoc above for why deferring via runLater fails).
+        pagesBox.applyCss();
+        pagesBox.layout();
+        scrollPane.applyCss();
+        scrollPane.layout();
+        scrollPane.setHvalue(anchor.hvalue());
+        scrollPane.setVvalue(anchor.vvalue());
+        logger.debug("zoom anchor applied: H={} V={} (post-layout content={}x{})",
+                scrollPane.getHvalue(), scrollPane.getVvalue(),
+                pagesBox.getLayoutBounds().getWidth(),
+                pagesBox.getLayoutBounds().getHeight());
     }
 
     /**
@@ -1389,51 +1473,6 @@ public class PdfPreviewPane extends ViewPanel {
         double sceneX = vpBoundsScene.getMinX() + vpBoundsScene.getWidth() / 2.0;
         double sceneY = vpBoundsScene.getMinY() + vpBoundsScene.getHeight() / 2.0;
         zoomAroundScenePoint(newZoom, sceneX, sceneY);
-    }
-
-    /**
-     * Compute and apply the hvalue/vvalue that puts {@code contentPoint *
-     * (newZoom/oldZoom)} at the same viewport offset
-     * {@code (cursorVpX, cursorVpY)} the cursor was at before the zoom.
-     *
-     * <p>JavaFX ScrollPane convention: {@code hvalue} maps linearly
-     * from {@code hmin} (content's left edge at viewport's left) to
-     * {@code hmax} (content's right edge at viewport's right).  So the
-     * scrollable range is {@code contentSize - viewportSize}; setting
-     * the value selects the fraction of that range that's scrolled past.
-     *
-     * <p>We pass in the OLD content size (captured before the zoom)
-     * and compute the NEW size as {@code oldSize * (newZoom/oldZoom)}.
-     * See {@link #zoomAroundScenePoint} for why we don't read
-     * {@code getLayoutBounds()} after the zoom.
-     */
-    private void applyZoomAnchor(javafx.geometry.Point2D contentPointAtOldZoom,
-                                 double oldZoom, double newZoom,
-                                 double cursorVpX, double cursorVpY,
-                                 double oldContentW, double oldContentH,
-                                 javafx.geometry.Bounds vp) {
-        double scale = newZoom / oldZoom;
-        double newContentW = oldContentW * scale;
-        double newContentH = oldContentH * scale;
-        double targetContentX = contentPointAtOldZoom.getX() * scale;
-        double targetContentY = contentPointAtOldZoom.getY() * scale;
-
-        double scrollableX = newContentW - vp.getWidth();
-        if (scrollableX > 0) {
-            double newScrollX = targetContentX - cursorVpX;
-            double hMin = scrollPane.getHmin();
-            double hMax = scrollPane.getHmax();
-            double h = hMin + (hMax - hMin) * clamp(newScrollX / scrollableX, 0, 1);
-            scrollPane.setHvalue(h);
-        }
-        double scrollableY = newContentH - vp.getHeight();
-        if (scrollableY > 0) {
-            double newScrollY = targetContentY - cursorVpY;
-            double vMin = scrollPane.getVmin();
-            double vMax = scrollPane.getVmax();
-            double v = vMin + (vMax - vMin) * clamp(newScrollY / scrollableY, 0, 1);
-            scrollPane.setVvalue(v);
-        }
     }
 
     private static double clamp(double v, double lo, double hi) {
