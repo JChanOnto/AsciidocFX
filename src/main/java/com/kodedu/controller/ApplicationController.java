@@ -822,10 +822,9 @@ public class ApplicationController extends TextWebSocketHandler implements Initi
                     javafx.scene.control.Label name =
                             new javafx.scene.control.Label(item.toString());
                     // Filename label grows to fill the row; if the name
-                    // is longer than the row, JavaFX truncates with the
-                    // default ellipsis instead of pushing the MASTER
-                    // badge off the right edge.  This is the whole point
-                    // of HGROW=ALWAYS + maxWidth=MAX_VALUE on a Label.
+                    // is longer than the available width, JavaFX
+                    // truncates with the default ellipsis instead of
+                    // pushing the MASTER badge off the right edge.
                     name.setMaxWidth(Double.MAX_VALUE);
                     name.setMinWidth(0);
                     javafx.scene.layout.HBox.setHgrow(name,
@@ -845,13 +844,24 @@ public class ApplicationController extends TextWebSocketHandler implements Initi
                     javafx.scene.layout.HBox row =
                             new javafx.scene.layout.HBox(6, name, badge);
                     row.setAlignment(javafx.geometry.Pos.CENTER_LEFT);
-                    // Bind the row width to the cell so the name label's
-                    // grow region knows where to stop and trigger
-                    // ellipsis.  Without this the HBox would be sized
-                    // to its preferred (text + badge) width and the
-                    // badge would scroll out with the name.
+                    // Anchor the row to the TreeView's visible width
+                    // (not the cell's, which can extend past the
+                    // viewport when long filenames cause horizontal
+                    // scrolling and would push the badge off-screen).
+                    // Subtract the per-level indent + disclosure arrow
+                    // + a vertical-scrollbar safety margin so the badge
+                    // always sits flush with the visible right edge.
+                    int depth = 0;
+                    for (javafx.scene.control.TreeItem<?> p = getTreeItem();
+                         p != null && p.getParent() != null;
+                         p = p.getParent()) {
+                        depth++;
+                    }
+                    double indentPx = depth * 18.0 + 24.0; // disclosure + per-level
+                    double trailingPx = 18.0;              // vertical scrollbar + slack
                     row.prefWidthProperty().bind(
-                            widthProperty().subtract(20));
+                            fileSystemView.widthProperty()
+                                    .subtract(indentPx + trailingPx));
                     row.setMaxWidth(javafx.scene.layout.Region.USE_PREF_SIZE);
                     setText(null);
                     setGraphic(row);
