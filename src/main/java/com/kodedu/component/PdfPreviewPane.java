@@ -114,7 +114,7 @@ public class PdfPreviewPane extends ViewPanel {
     /** Debounce timer for the heavy re-rasterise. Run on FX thread. */
     private javafx.animation.PauseTransition zoomDebounce;
     /** Tracks whether a re-rasterise is currently in flight on the executor. */
-    private final java.util.concurrent.atomic.AtomicBoolean reraserizing =
+    private final java.util.concurrent.atomic.AtomicBoolean rerasterizing =
             new java.util.concurrent.atomic.AtomicBoolean(false);
 
     /**
@@ -286,8 +286,8 @@ public class PdfPreviewPane extends ViewPanel {
             // Lazy-render trigger: any time the viewport moves or
             // resizes, request the now-visible pages.  Debounced so a
             // single drag of the scrollbar doesn't fire a request per
-            // pixel.  100ms is short enough to feel "as you scroll"
-            // and long enough to coalesce.
+            // pixel.  80ms is short enough to feel "as you scroll"
+            // and long enough to coalesce a smooth drag.
             viewportDebounce = new javafx.animation.PauseTransition(Duration.millis(80));
             viewportDebounce.setOnFinished(e -> requestVisiblePages());
             scrollPane.vvalueProperty().addListener((obs, ov, nv) -> viewportDebounce.playFromStart());
@@ -812,15 +812,14 @@ public class PdfPreviewPane extends ViewPanel {
     private void rasterizeAndShow() {
         final int gen = renderGeneration.incrementAndGet();
         final double zoom = zoomSlider.getValue();
-        final float dpi = (float) (BASE_DPI * zoom);
 
         // Phase 1: load metadata + outline.  Close immediately; the
         // long-lived handle is opened lazily on the first render
         // request so we don't pay the open cost twice.
-        List<Double> widths = new ArrayList<>();
-        List<Double> heights = new ArrayList<>();
-        List<PdfOutlineEntry> outline;
-        int pageCount;
+        final List<Double> widths = new ArrayList<>();
+        final List<Double> heights = new ArrayList<>();
+        final List<PdfOutlineEntry> outline;
+        final int pageCount;
         try (PDDocument doc = Loader.loadPDF(tmpPdf.toFile())) {
             pageCount = doc.getNumberOfPages();
             for (int i = 0; i < pageCount; i++) {
@@ -842,7 +841,7 @@ public class PdfPreviewPane extends ViewPanel {
             cachedPagePtWidths.addAll(widths);
             cachedPagePtHeights.clear();
             cachedPagePtHeights.addAll(heights);
-            cachedImagesDpi = dpi;
+            cachedImagesDpi = (float) (BASE_DPI * zoom);
             currentOutline.clear();
             currentOutline.addAll(outline);
             lruOrder.clear();
@@ -853,14 +852,12 @@ public class PdfPreviewPane extends ViewPanel {
         publishOutline(outline);
 
         // Phase 2: build placeholders.
-        final List<Double> finalWidths = widths;
-        final List<Double> finalHeights = heights;
         Platform.runLater(() -> {
             if (gen != renderGeneration.get()) return;
             pagesBox.getChildren().clear();
             for (int i = 0; i < pageCount; i++) {
                 pagesBox.getChildren().add(
-                        buildPlaceholder(finalWidths.get(i), finalHeights.get(i), zoom));
+                        buildPlaceholder(widths.get(i), heights.get(i), zoom));
             }
             // After the layout settles, ask for whichever pages are
             // visible.  Defer to next pulse so the viewport bounds
@@ -885,14 +882,10 @@ public class PdfPreviewPane extends ViewPanel {
             heights = new ArrayList<>(cachedPagePtHeights);
         }
         double spacing = pagesBox.getSpacing();
-        double viewportH;
-        double scrollV;
-        try {
-            viewportH = scrollPane.getViewportBounds().getHeight();
-            scrollV = scrollPane.getVvalue();
-        } catch (Exception ignored) {
-            return;
-        }
+        var bounds = scrollPane.getViewportBounds();
+        if (bounds == null) return; // pre-layout
+        double viewportH = bounds.getHeight();
+        double scrollV = scrollPane.getVvalue();
         int[] range = visiblePageRange(heights, scrollV, viewportH, zoom, spacing,
                 BASE_DPI, PREFETCH_RADIUS);
         int from = range[0];
@@ -1197,7 +1190,7 @@ public class PdfPreviewPane extends ViewPanel {
      * visibly from sharper pixels.  Specifically: skip when zoom <= the
      * DPI we already rasterised at (downscale is sharp; upscale beyond
      * the cached DPI is blurry and warrants a fresh render).  Also
-     * coalesces concurrent calls via {@link #reraserizing}.
+     * coalesces concurrent calls via {@link #rerasterizing}.
      *
      * <p>Zoom-up is now cheap because we only ever re-render the
      * cached (visible-window) pages, not the whole document.  We
@@ -1218,15 +1211,17 @@ public class PdfPreviewPane extends ViewPanel {
         if (wantDpi <= cachedImagesDpi * 1.05f) {
             return;
         }
-        if (!reraserizing.compareAndSet(false, true)) {
+        if (!rerasterizing.compareAndSet(false, true)) {
             return;
         }
         renderExecutor.submit(() -> {
             try {
                 final int gen = renderGeneration.incrementAndGet();
                 final double zoom = zoomSlider.getValue();
+                final int pageCount;
                 synchronized (cachedImages) {
-                    for (int i = 0; i < cachedImages.size(); i++) {
+                    pageCount = cachedImages.size();
+                    for (int i = 0; i < pageCount; i++) {
                         cachedImages.set(i, null);
                     }
                     lruOrder.clear();
@@ -1236,20 +1231,16 @@ public class PdfPreviewPane extends ViewPanel {
                 closeCachedHandle();
                 Platform.runLater(() -> {
                     if (gen != renderGeneration.get()) return;
-                    // Replace every node with a placeholder sized for
+                    // Restore every slot to a placeholder sized for
                     // the new zoom; the viewport listener will drive
                     // re-render of whatever is in view.
-                    int n = pagesBox.getChildren().size();
-                    for (int i = 0; i < n && i < cachedPagePtWidths.size()
-                            && i < cachedPagePtHeights.size(); i++) {
-                        pagesBox.getChildren().set(i,
-                                buildPlaceholder(cachedPagePtWidths.get(i),
-                                        cachedPagePtHeights.get(i), zoom));
+                    for (int i = 0; i < pageCount; i++) {
+                        restorePlaceholder(i, zoom);
                     }
                     requestVisiblePages();
                 });
             } finally {
-                reraserizing.set(false);
+                rerasterizing.set(false);
             }
         });
     }
