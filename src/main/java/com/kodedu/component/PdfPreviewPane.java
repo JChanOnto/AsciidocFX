@@ -1331,15 +1331,22 @@ public class PdfPreviewPane extends ViewPanel {
      *
      * <p>Algorithm:
      * <ol>
-     *   <li>Convert the cursor's scene coords to the {@code pagesBox}
-     *       content's local coords at the OLD zoom.</li>
+     *   <li>Capture the cursor's content-local coords AND the current
+     *       content/viewport sizes BEFORE the zoom change.</li>
+     *   <li>Capture the cursor's offset within the visible viewport.</li>
      *   <li>Apply the zoom (which rescales every ImageView and re-lays
      *       out the VBox).</li>
-     *   <li>Force a synchronous layout pass so the new content size is
-     *       known.</li>
-     *   <li>Compute the new content coords for the same document point
-     *       (multiply by newZoom/oldZoom), then back-solve the
-     *       hvalue/vvalue that places that point at the cursor's
+     *   <li>Compute the NEW content size analytically as
+     *       {@code oldContentSize * (newZoom/oldZoom)}.  We do NOT
+     *       trust {@code pagesBox.getLayoutBounds()} after the zoom -
+     *       a synchronous {@code applyCss/layout} pass does not
+     *       reliably propagate the new size through ScrollPane's
+     *       content-sizing path on the same pulse, so reads of
+     *       {@code getLayoutBounds()} can return the OLD dimensions.
+     *       That used to clamp the computed scroll ratio to 0 and
+     *       snap the view to page 1.</li>
+     *   <li>Back-solve hvalue/vvalue to put
+     *       {@code contentPoint*(newZoom/oldZoom)} at the original
      *       viewport offset.</li>
      * </ol>
      */
@@ -1348,25 +1355,23 @@ public class PdfPreviewPane extends ViewPanel {
         if (Math.abs(newZoom - oldZoom) < 0.0001) {
             return;
         }
-        // Cursor in pagesBox-local coords at OLD zoom (the "document point").
+        // Snapshot everything we need from the OLD layout, before the
+        // zoom mutates the children's sizes.
         javafx.geometry.Point2D contentPoint = pagesBox.sceneToLocal(sceneX, sceneY);
-        // Cursor offset within the visible viewport (pixels from the
-        // viewport's top-left).  This is what we'll preserve.
         javafx.geometry.Bounds vpBoundsScene = scrollPane.localToScene(
                 scrollPane.getViewportBounds());
         double cursorVpX = sceneX - vpBoundsScene.getMinX();
         double cursorVpY = sceneY - vpBoundsScene.getMinY();
+        javafx.geometry.Bounds oldContent = pagesBox.getLayoutBounds();
+        javafx.geometry.Bounds vp = scrollPane.getViewportBounds();
+        double oldContentW = oldContent.getWidth();
+        double oldContentH = oldContent.getHeight();
 
         zoomSlider.setValue(newZoom); // fires rescaleViewsInstantly + debounce
 
-        // Force layout so the new content size is committed before we
-        // sample contentBounds and viewportBounds.
-        pagesBox.applyCss();
-        pagesBox.layout();
-        scrollPane.applyCss();
-        scrollPane.layout();
-
-        applyZoomAnchor(contentPoint, oldZoom, newZoom, cursorVpX, cursorVpY);
+        applyZoomAnchor(contentPoint, oldZoom, newZoom,
+                cursorVpX, cursorVpY,
+                oldContentW, oldContentH, vp);
     }
 
     /**
@@ -1394,19 +1399,26 @@ public class PdfPreviewPane extends ViewPanel {
      * <p>JavaFX ScrollPane convention: {@code hvalue} maps linearly
      * from {@code hmin} (content's left edge at viewport's left) to
      * {@code hmax} (content's right edge at viewport's right).  So the
-     * scrollable range is {@code contentWidth - viewportWidth}; setting
-     * hvalue selects the fraction of that range that's scrolled past.
+     * scrollable range is {@code contentSize - viewportSize}; setting
+     * the value selects the fraction of that range that's scrolled past.
+     *
+     * <p>We pass in the OLD content size (captured before the zoom)
+     * and compute the NEW size as {@code oldSize * (newZoom/oldZoom)}.
+     * See {@link #zoomAroundScenePoint} for why we don't read
+     * {@code getLayoutBounds()} after the zoom.
      */
     private void applyZoomAnchor(javafx.geometry.Point2D contentPointAtOldZoom,
                                  double oldZoom, double newZoom,
-                                 double cursorVpX, double cursorVpY) {
-        javafx.geometry.Bounds vp = scrollPane.getViewportBounds();
-        javafx.geometry.Bounds content = pagesBox.getLayoutBounds();
+                                 double cursorVpX, double cursorVpY,
+                                 double oldContentW, double oldContentH,
+                                 javafx.geometry.Bounds vp) {
         double scale = newZoom / oldZoom;
+        double newContentW = oldContentW * scale;
+        double newContentH = oldContentH * scale;
         double targetContentX = contentPointAtOldZoom.getX() * scale;
         double targetContentY = contentPointAtOldZoom.getY() * scale;
 
-        double scrollableX = content.getWidth() - vp.getWidth();
+        double scrollableX = newContentW - vp.getWidth();
         if (scrollableX > 0) {
             double newScrollX = targetContentX - cursorVpX;
             double hMin = scrollPane.getHmin();
@@ -1414,7 +1426,7 @@ public class PdfPreviewPane extends ViewPanel {
             double h = hMin + (hMax - hMin) * clamp(newScrollX / scrollableX, 0, 1);
             scrollPane.setHvalue(h);
         }
-        double scrollableY = content.getHeight() - vp.getHeight();
+        double scrollableY = newContentH - vp.getHeight();
         if (scrollableY > 0) {
             double newScrollY = targetContentY - cursorVpY;
             double vMin = scrollPane.getVmin();
