@@ -1480,11 +1480,35 @@ public class PdfPreviewPane extends ViewPanel {
         if (Math.abs(newZoom - oldZoom) < 0.0001) {
             return;
         }
-        javafx.geometry.Bounds vpBoundsScene = scrollPane.localToScene(
-                scrollPane.getViewportBounds());
-        double sceneX = vpBoundsScene.getMinX() + vpBoundsScene.getWidth() / 2.0;
-        double sceneY = vpBoundsScene.getMinY() + vpBoundsScene.getHeight() / 2.0;
-        zoomAroundScenePoint(newZoom, sceneX, sceneY);
+        javafx.geometry.Point2D centre = viewportCenterScene(scrollPane);
+        zoomAroundScenePoint(newZoom, centre.getX(), centre.getY());
+    }
+
+    /**
+     * Compute the scene-coord centre of {@code scrollPane}'s viewport.
+     *
+     * <p>This deliberately avoids
+     * {@code scrollPane.localToScene(scrollPane.getViewportBounds())}
+     * because {@link javafx.scene.control.ScrollPane#getViewportBounds()}
+     * returns the viewport's position within the CONTENT (a JavaFX
+     * quirk where {@code minX/minY} carry the negated scroll offset),
+     * not within the scrollPane local coordinate system.  Feeding
+     * those minX/minY through {@code localToScene} produces a phantom
+     * point thousands of pixels off-screen whenever the user has
+     * scrolled \u2014 which is exactly the symptom of the +/- toolbar
+     * buttons jumping the page on every click after a scroll.
+     *
+     * <p>The size from {@code getViewportBounds()} is correct, however;
+     * only the origin is bogus.  The scrollPane node itself reports
+     * its true scene origin via {@code localToScene(0, 0)}.
+     */
+    static javafx.geometry.Point2D viewportCenterScene(
+            javafx.scene.control.ScrollPane scrollPane) {
+        javafx.geometry.Bounds vpSize = scrollPane.getViewportBounds();
+        javafx.geometry.Point2D originScene = scrollPane.localToScene(0.0, 0.0);
+        return new javafx.geometry.Point2D(
+                originScene.getX() + vpSize.getWidth() / 2.0,
+                originScene.getY() + vpSize.getHeight() / 2.0);
     }
 
     private static double clamp(double v, double lo, double hi) {

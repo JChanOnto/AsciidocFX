@@ -409,4 +409,94 @@ class PdfPreviewPaneZoomRealisticTest {
                 "zoom-out cursor anchor lost after debounce; expected="
                         + expectedDocY + " actual=" + actualDocY);
     }
+
+    /**
+     * Mirror of {@link PdfPreviewPane}'s {@code zoomAroundViewportCenter}
+     * (the +/- toolbar button code path).  Computes the anchor scene
+     * point by calling the production helper
+     * {@link PdfPreviewPane#viewportCenterScene} so any regression in
+     * its math (e.g. accidentally re-introducing
+     * {@code scrollPane.localToScene(scrollPane.getViewportBounds())},
+     * whose {@code minX/Y} can carry the negated scroll offset under
+     * {@code setFitToWidth(true)}) shows up here.
+     */
+    private void clickZoomButton(double newZoom) throws InterruptedException {
+        Point2D centre = PdfPreviewPane.viewportCenterScene(scrollPane);
+        zoomAroundScenePoint(newZoom, centre.getX(), centre.getY());
+    }
+
+    @Test
+    void buttonZoomInAtMidDocumentKeepsCentreDocPointStable() throws Exception {
+        // The +/- buttons must behave like cursor zoom with the cursor
+        // at the dead centre of the viewport.  After clicking +, the
+        // document point that was at the viewport centre BEFORE the
+        // click must STAY near the viewport centre AFTER, including
+        // after the 220ms debounced rerasterize fires.
+        //
+        // We assert that the vvalue lands within the band around the
+        // mid-document position, NOT that the doc Y matches a naive
+        // {@code oldDocY * zoom} formula \u2014 the latter is wrong
+        // by up to {@code (pagesCrossed * spacing * (zoom - 1))} pixels
+        // because VBox spacing does not scale with zoom.  The
+        // user-perceptible failure mode is "vvalue collapsed to ~0",
+        // not "vvalue is off by 7 pixels".
+        onFx(() -> scrollPane.setVvalue(0.5));
+        double startV = scrollPane.getVvalue();
+
+        clickZoomButton(1.2);
+
+        double afterImmediateV = scrollPane.getVvalue();
+        assertTrue(afterImmediateV > 0.30 && afterImmediateV < 0.70,
+                "button zoom-in: vvalue lost mid-document position synchronously, "
+                        + "was " + startV + " now " + afterImmediateV
+                        + " \u2014 should stay near 0.5");
+
+        waitForRerasterize();
+
+        double afterDebounceV = scrollPane.getVvalue();
+        assertTrue(afterDebounceV > 0.30 && afterDebounceV < 0.70,
+                "button zoom-in: vvalue lost mid-document position after debounce, "
+                        + "was " + startV + " now " + afterDebounceV
+                        + " \u2014 the +/- snap-to-top regression the user reported");
+    }
+
+    @Test
+    void multipleButtonClicksAtMidDocumentPreserveCentreAcrossEveryDebounce()
+            throws Exception {
+        // Mimics the user repeatedly clicking + to zoom in step by step.
+        // Each click + debounce must NOT collapse the scroll position
+        // to the top of the document.
+        onFx(() -> scrollPane.setVvalue(0.5));
+        double startV = scrollPane.getVvalue();
+
+        for (double step : new double[] {1.1, 1.2, 1.3, 1.4}) {
+            clickZoomButton(step);
+            waitForRerasterize();
+
+            double v = scrollPane.getVvalue();
+            assertTrue(v > 0.25 && v < 0.75,
+                    "after button-click zoom " + step + " (post-debounce) the "
+                            + "vvalue collapsed away from 0.5: was " + startV
+                            + " now " + v
+                            + " \u2014 user-reported symptom: pages move up on +/-");
+        }
+    }
+
+    @Test
+    void buttonZoomNearBottomDoesNotSnapToTop() throws Exception {
+        // Specific shape of the user-reported bug: clicking + when
+        // scrolled near the end snaps the view back to page 1.
+        onFx(() -> scrollPane.setVvalue(0.95));
+        double startV = scrollPane.getVvalue();
+        assertTrue(startV > 0.8, "precondition: scrolled near bottom, got " + startV);
+
+        clickZoomButton(1.2);
+        waitForRerasterize();
+
+        double afterV = scrollPane.getVvalue();
+        assertTrue(afterV > 0.5,
+                "after button zoom-in near bottom, scroll vvalue collapsed from "
+                        + startV + " to " + afterV
+                        + " \u2014 the +/- snap-to-top regression the user reported");
+    }
 }
