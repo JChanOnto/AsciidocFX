@@ -518,20 +518,39 @@ public class PdfPreviewPane extends ViewPanel {
         logger.debug("PDF preview render queued");
         setLoading(true);
         Future<?> next = renderExecutor.submit(() -> {
+            boolean deferred = false;
             try {
-                renderNow();
+                deferred = renderNow();
             } finally {
-                setLoading(false);
+                // Keep the dots spinning while we wait on Ace bootstrap
+                // or the executor's backlog.  renderNow() returns true
+                // when it has armed a re-render via a readiness
+                // listener; that listener will call render() again,
+                // which sets loading=true a second time.  Without this
+                // guard the dots would flash off during the first
+                // startup window (Ace + JRuby asciidoctor warmup, often
+                // several seconds) and the user would think nothing is
+                // happening.
+                if (!deferred) {
+                    setLoading(false);
+                }
             }
         });
         inFlight.set(next);
     }
 
-    private void renderNow() {
+    /**
+     * Run one render pass.  Returns {@code true} when the render was
+     * deferred (waiting on editor readiness or similar) and a follow-up
+     * {@link #render()} call has been armed; the caller should leave
+     * the loading indicator on in that case.  Returns {@code false}
+     * when the render has either completed or failed terminally.
+     */
+    private boolean renderNow() {
         try {
             com.kodedu.component.MyTab tab = current.currentTab();
             if (tab == null || tab.getPath() == null) {
-                return;
+                return false;
             }
             // Editor JS may not have booted yet at startup (Ace bootstrap
             // races the first render trigger). Defer and self-rearm via
@@ -550,16 +569,17 @@ public class PdfPreviewPane extends ViewPanel {
                         }
                     };
                     ready.addListener(holder[0]);
+                    return true; // deferred — keep loading dots spinning
                 }
-                return;
+                return false;
             }
             String asciidoc = current.currentEditorValue();
             if (asciidoc == null) {
-                return;
+                return false;
             }
             Path masterAdoc = resolveMasterAdoc();
             if (masterAdoc == null) {
-                return;
+                return false;
             }
             // Publish the resolved master so the file-tree cell factory
             // can paint a "MASTER" badge on the matching row.
@@ -578,7 +598,7 @@ public class PdfPreviewPane extends ViewPanel {
             int hash = (r.scopeUsed().name() + "|" + r.source()).hashCode();
             if (hash == lastRenderHash && Files.size(tmpPdf) > 0) {
                 logger.debug("PDF preview unchanged since last render; reusing {}", tmpPdf);
-                return;
+                return false;
             }
 
             long t0 = System.currentTimeMillis();
@@ -603,6 +623,7 @@ public class PdfPreviewPane extends ViewPanel {
         } catch (Exception e) {
             logger.warn("PDF preview render failed (keeping previous pages visible)", e);
         }
+        return false;
     }
 
     private Path resolveMasterAdoc() {
