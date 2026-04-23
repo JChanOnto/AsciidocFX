@@ -1274,6 +1274,17 @@ public class PdfPreviewPane extends ViewPanel {
      * scroll = contentSize - viewportSize).  When the content is
      * shorter than the viewport (scrollable range &le; 0) we keep
      * the existing value rather than dividing by zero.
+     *
+     * <p>{@code fixedOverheadW} / {@code fixedOverheadH} are the
+     * fixed-pixel portions of the content size that do NOT scale
+     * with zoom \u2014 specifically, the {@code VBox.spacing}
+     * gaps between page nodes (and any {@link javafx.geometry.Insets}
+     * padding).  Without this correction the math assumes
+     * {@code newContent = oldContent * scale}, which over- or
+     * undershoots by the (un-scaled) spacing total and visibly
+     * drifts the cursor anchor by tens of pixels on a typical
+     * 20-page document.  Pass 0 if all of the content scales
+     * uniformly.
      */
     static ZoomAnchor computeZoomAnchor(
             double anchorContentX, double anchorContentY,
@@ -1282,10 +1293,24 @@ public class PdfPreviewPane extends ViewPanel {
             double oldContentW, double oldContentH,
             double viewportW, double viewportH,
             double currentH, double currentV,
-            double hMin, double hMax, double vMin, double vMax) {
+            double hMin, double hMax, double vMin, double vMax,
+            double fixedOverheadW, double fixedOverheadH) {
         double scale = newZoom / oldZoom;
-        double newContentW = oldContentW * scale;
-        double newContentH = oldContentH * scale;
+        // Decompose into "scales with zoom" portion + "fixed overhead"
+        // portion so spacing/insets that don't scale don't throw the
+        // anchor math off.
+        double scalableOldW = Math.max(0, oldContentW - fixedOverheadW);
+        double scalableOldH = Math.max(0, oldContentH - fixedOverheadH);
+        double newContentW = scalableOldW * scale + fixedOverheadW;
+        double newContentH = scalableOldH * scale + fixedOverheadH;
+
+        // The anchor itself: the document-local Y of the cursor sits
+        // somewhere inside the scalable region, NOT including the
+        // spacing strips that get glued back on after scaling.  Use
+        // a uniform scale here because for the typical case the
+        // anchor is inside a page (the spacing strips are between
+        // pages, where the cursor rarely lands and where any error
+        // is visually invisible).
         double targetContentX = anchorContentX * scale;
         double targetContentY = anchorContentY * scale;
 
@@ -1302,6 +1327,32 @@ public class PdfPreviewPane extends ViewPanel {
             newV = vMin + (vMax - vMin) * clamp(newScrollY / scrollableY, 0, 1);
         }
         return new ZoomAnchor(newH, newV);
+    }
+
+    /**
+     * Backwards-compatible overload assuming all content scales
+     * uniformly with zoom.  Kept so the existing
+     * {@code PdfPreviewPaneZoomAnchorTest} keeps pinning the
+     * uniform-scale contract; new callers should pass explicit
+     * fixed-overhead values.
+     */
+    static ZoomAnchor computeZoomAnchor(
+            double anchorContentX, double anchorContentY,
+            double cursorVpX, double cursorVpY,
+            double oldZoom, double newZoom,
+            double oldContentW, double oldContentH,
+            double viewportW, double viewportH,
+            double currentH, double currentV,
+            double hMin, double hMax, double vMin, double vMax) {
+        return computeZoomAnchor(
+                anchorContentX, anchorContentY,
+                cursorVpX, cursorVpY,
+                oldZoom, newZoom,
+                oldContentW, oldContentH,
+                viewportW, viewportH,
+                currentH, currentV,
+                hMin, hMax, vMin, vMax,
+                0, 0);
     }
 
     /** Result of {@link #computeZoomAnchor}: target hvalue / vvalue
@@ -1352,26 +1403,46 @@ public class PdfPreviewPane extends ViewPanel {
         // Snapshot everything we need from the OLD layout, before the
         // zoom mutates the children's sizes.
         javafx.geometry.Point2D contentPoint = pagesBox.sceneToLocal(sceneX, sceneY);
-        javafx.geometry.Bounds vpBoundsScene = scrollPane.localToScene(
-                scrollPane.getViewportBounds());
-        double cursorVpX = sceneX - vpBoundsScene.getMinX();
-        double cursorVpY = sceneY - vpBoundsScene.getMinY();
         javafx.geometry.Bounds oldContent = pagesBox.getLayoutBounds();
         javafx.geometry.Bounds vp = scrollPane.getViewportBounds();
         double oldContentW = oldContent.getWidth();
         double oldContentH = oldContent.getHeight();
         double currentH = scrollPane.getHvalue();
         double currentV = scrollPane.getVvalue();
+        double viewportW = vp.getWidth();
+        double viewportH = vp.getHeight();
+
+        // Compute cursor position WITHIN the viewport directly from
+        // the content-local cursor and the current scroll offset.
+        // Do NOT use {@code scrollPane.localToScene(scrollPane.getViewportBounds())}
+        // here \u2014 ScrollPane.getViewportBounds() returns bounds whose
+        // {@code minY} is the negated scroll-pixel offset (a JavaFX
+        // quirk: viewportBounds is the viewport's position within the
+        // CONTENT, not within the scrollPane's local coords), so as
+        // the user scrolls down the implied "viewport scene origin"
+        // shifts by the scroll amount and {@code cursorVpY} ends up
+        // way off.  This bug only manifested on the second + zoom
+        // step (the first zoom always starts at {@code vvalue=0}); the
+        // realistic multi-step test pins it.
+        double scrollableYOld = Math.max(0, oldContentH - viewportH);
+        double scrollableXOld = Math.max(0, oldContentW - viewportW);
+        double currentScrollPxY = scrollableYOld * (currentV - scrollPane.getVmin())
+                / Math.max(1e-9, scrollPane.getVmax() - scrollPane.getVmin());
+        double currentScrollPxX = scrollableXOld * (currentH - scrollPane.getHmin())
+                / Math.max(1e-9, scrollPane.getHmax() - scrollPane.getHmin());
+        double cursorVpX = contentPoint.getX() - currentScrollPxX;
+        double cursorVpY = contentPoint.getY() - currentScrollPxY;
 
         ZoomAnchor anchor = computeZoomAnchor(
                 contentPoint.getX(), contentPoint.getY(),
                 cursorVpX, cursorVpY,
                 oldZoom, newZoom,
                 oldContentW, oldContentH,
-                vp.getWidth(), vp.getHeight(),
+                viewportW, viewportH,
                 currentH, currentV,
                 scrollPane.getHmin(), scrollPane.getHmax(),
-                scrollPane.getVmin(), scrollPane.getVmax());
+                scrollPane.getVmin(), scrollPane.getVmax(),
+                pagesBoxFixedOverheadW(), pagesBoxFixedOverheadH());
 
         logger.debug("zoom anchor: {} -> {}  cursorVp=({},{})  contentPt=({},{})"
                 + "  oldContent=({}x{})  vp=({}x{})  curH={} curV={}  newH={} newV={}",
@@ -1379,7 +1450,7 @@ public class PdfPreviewPane extends ViewPanel {
                 cursorVpX, cursorVpY,
                 contentPoint.getX(), contentPoint.getY(),
                 oldContentW, oldContentH,
-                vp.getWidth(), vp.getHeight(),
+                viewportW, viewportH,
                 currentH, currentV,
                 anchor.hvalue(), anchor.vvalue());
 
@@ -1418,6 +1489,34 @@ public class PdfPreviewPane extends ViewPanel {
 
     private static double clamp(double v, double lo, double hi) {
         return Math.max(lo, Math.min(hi, v));
+    }
+
+    /**
+     * Fixed (non-scaling) horizontal overhead inside {@link #pagesBox}.
+     * Pages stack vertically so the only horizontal contribution that
+     * doesn't scale with zoom is any padding on the VBox itself.
+     * {@link #afterViewInit()} sets {@code pagesBox.setPadding(new Insets(8))}.
+     */
+    private double pagesBoxFixedOverheadW() {
+        Insets pad = pagesBox.getPadding();
+        return pad == null ? 0 : pad.getLeft() + pad.getRight();
+    }
+
+    /**
+     * Fixed (non-scaling) vertical overhead inside {@link #pagesBox}:
+     * the {@code spacing} gaps between page nodes plus the top/bottom
+     * padding on the VBox.  Both are pixel constants that don't scale
+     * when the user zooms; without subtracting them out of the math,
+     * {@link #computeZoomAnchor} drifts the cursor anchor by the
+     * (un-scaled) overhead total \u2014 tens of pixels on a typical
+     * 20-page document.
+     */
+    private double pagesBoxFixedOverheadH() {
+        int n = pagesBox.getChildren().size();
+        double spacingTotal = pagesBox.getSpacing() * Math.max(0, n - 1);
+        Insets pad = pagesBox.getPadding();
+        double padTotal = pad == null ? 0 : pad.getTop() + pad.getBottom();
+        return spacingTotal + padTotal;
     }
 
     /**
@@ -1466,12 +1565,33 @@ public class PdfPreviewPane extends ViewPanel {
                 closeCachedHandle();
                 Platform.runLater(() -> {
                     if (gen != renderGeneration.get()) return;
+                    // Snapshot the user's current scroll position so we
+                    // can restore it after replacing every child node
+                    // below.  Without this snapshot+restore the
+                    // children-replace pass causes ScrollPane to snap
+                    // the view to the top \u2014 the long-standing
+                    // "zoom always jumps to page 1" bug.  See
+                    // PdfPreviewPaneZoomRealisticTest.multiStepZoomMaintainsCursorAcrossEveryDebounce
+                    // for the regression that pins this behaviour.
+                    double savedH = scrollPane.getHvalue();
+                    double savedV = scrollPane.getVvalue();
                     // Restore every slot to a placeholder sized for
                     // the new zoom; the viewport listener will drive
                     // re-render of whatever is in view.
                     for (int i = 0; i < pageCount; i++) {
                         restorePlaceholder(i, zoom);
                     }
+                    // Force the layout pulse so ScrollPane internalises
+                    // the new content size BEFORE we re-apply the saved
+                    // scroll values, then re-apply them.  Same pattern
+                    // as zoomAroundScenePoint \u2014 see its javadoc for
+                    // why deferring via runLater alone is insufficient.
+                    pagesBox.applyCss();
+                    pagesBox.layout();
+                    scrollPane.applyCss();
+                    scrollPane.layout();
+                    scrollPane.setHvalue(savedH);
+                    scrollPane.setVvalue(savedV);
                     requestVisiblePages();
                 });
             } finally {
