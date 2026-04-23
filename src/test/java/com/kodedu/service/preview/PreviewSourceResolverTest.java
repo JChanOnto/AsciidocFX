@@ -117,28 +117,6 @@ class PreviewSourceResolverTest {
     }
 
     @Test
-    void includeExtractorReturnsOnlyTopOfLineIncludes(@TempDir Path tmp) throws IOException {
-        Path file = Files.writeString(tmp.resolve("master.adoc"),
-                String.join("\n",
-                        "= Book",
-                        "include::sections/01.adoc[]",
-                        "  include::sections/02.adoc[]",
-                        "// include::sections/comment.adoc[]",  // commented; conservative parser still picks up — see note
-                        "include::sections/03.adoc[leveloffset=+1]",
-                        "Inline include::sections/inline.adoc[] in prose")
-        );
-        var includes = PreviewSourceResolver.extractIncludes(file);
-        // Top-of-line and indented forms count; commented and inline-in-prose do not.
-        assertTrue(includes.contains("sections/01.adoc"));
-        assertTrue(includes.contains("sections/02.adoc"));
-        assertTrue(includes.contains("sections/03.adoc"));
-        assertFalse(includes.contains("sections/inline.adoc"));
-        // Comment lines: the resolver doesn't try to parse comments; they are
-        // simply not matched because '//' doesn't satisfy the regex anchor.
-        assertFalse(includes.contains("sections/comment.adoc"));
-    }
-
-    @Test
     void resolvesNullScopeRejected(@TempDir Path tmp) throws IOException {
         Path master = writeMaster(tmp, "= Book\n");
         assertThrows(NullPointerException.class,

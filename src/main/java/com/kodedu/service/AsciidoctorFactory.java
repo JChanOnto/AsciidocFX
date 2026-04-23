@@ -25,19 +25,15 @@ import static org.springframework.core.Ordered.HIGHEST_PRECEDENCE;
 
 @Component
 public class AsciidoctorFactory {
+    // Each latch flips when (a) its bean has been instantiated AND
+    // (b) its `requireLibrary(...)` call has finished — i.e. the
+    // backend converter is actually registered.  See SpringAppConfig:
+    // requireLibrary is now invoked synchronously inside each bean
+    // factory, so "bean is resolvable" === "backend is ready".
     private static CountDownLatch plainDoctorReady = new CountDownLatch(1);
     private static CountDownLatch revealDoctorReady = new CountDownLatch(1);
     private static CountDownLatch htmlDoctorReady = new CountDownLatch(1);
     private static CountDownLatch nonHtmlDoctorReady = new CountDownLatch(1);
-    /**
-     * Flips when {@code asciidoctor-pdf} (and the rest of the non-HTML
-     * gem set) has finished loading on the {@link #nonHtmlDoctor}.  The
-     * {@link #nonHtmlDoctorReady} latch only signals "the bean is
-     * resolvable" — its async {@code requireLibrary} call may still be
-     * mid-load. Renderers that need the PDF backend should
-     * {@link #waitForPdfBackend() wait on this} instead.
-     */
-    private static CountDownLatch pdfBackendReady = new CountDownLatch(1);
     private static Asciidoctor plainDoctor;
     private static Asciidoctor revealDoctor;
     private static Asciidoctor htmlDoctor;
@@ -56,14 +52,29 @@ public class AsciidoctorFactory {
             Thread.startVirtualThread(() -> {
                 directoryService = context.getBean(DirectoryService.class);
             });
-            plainDoctor = context.getBean("plainDoctor", Asciidoctor.class);
-            plainDoctorReady.countDown();
-            htmlDoctor = context.getBean("htmlDoctor", Asciidoctor.class);
-            htmlDoctorReady.countDown();
-            nonHtmlDoctor = context.getBean("nonHtmlDoctor", Asciidoctor.class);
-            nonHtmlDoctorReady.countDown();
-            revealDoctor = context.getBean("revealDoctor", Asciidoctor.class);
-            revealDoctorReady.countDown();
+            // Resolve the four lazy doctor beans on parallel virtual
+            // threads.  Each bean factory now blocks on its own
+            // requireLibrary(...) so the latch flips only when that
+            // backend is genuinely ready to convert.  Running them in
+            // parallel preserves the startup throughput the previous
+            // (racy) async-require hack was buying us, without the
+            // race.
+            Thread.startVirtualThread(() -> {
+                plainDoctor = context.getBean("plainDoctor", Asciidoctor.class);
+                plainDoctorReady.countDown();
+            });
+            Thread.startVirtualThread(() -> {
+                htmlDoctor = context.getBean("htmlDoctor", Asciidoctor.class);
+                htmlDoctorReady.countDown();
+            });
+            Thread.startVirtualThread(() -> {
+                nonHtmlDoctor = context.getBean("nonHtmlDoctor", Asciidoctor.class);
+                nonHtmlDoctorReady.countDown();
+            });
+            Thread.startVirtualThread(() -> {
+                revealDoctor = context.getBean("revealDoctor", Asciidoctor.class);
+                revealDoctorReady.countDown();
+            });
         });
     }
 
@@ -124,23 +135,6 @@ public class AsciidoctorFactory {
         waitLatch(nonHtmlDoctorReady);
         checkUserExtensions(nonHtmlDoctor);
         return nonHtmlDoctor;
-    }
-
-    /**
-     * Block the caller until {@code asciidoctor-pdf} has finished loading
-     * on the non-HTML doctor.  Counted down by
-     * {@code SpringAppConfig.nonHtmlDoctor()} on its async startup
-     * thread; without this gate, the first PDF preview render can race
-     * the load and explode with
-     * {@code "missing converter for backend 'pdf'"}.
-     */
-    public static void waitForPdfBackend() {
-        waitLatch(pdfBackendReady);
-    }
-
-    /** Internal: signal that the non-HTML doctor's PDF backend is loaded. */
-    public static void signalPdfBackendReady() {
-        pdfBackendReady.countDown();
     }
 
     public static Asciidoctor getPlainDoctor() {

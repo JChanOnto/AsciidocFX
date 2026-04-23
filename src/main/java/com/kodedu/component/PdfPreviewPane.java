@@ -117,7 +117,6 @@ public class PdfPreviewPane extends ViewPanel {
 
     private final VBox pagesBox = new VBox(8);
     private final ScrollPane scrollPane = new ScrollPane(pagesBox);
-    private final Label statusLabel = new Label("PDF preview ready.");
     private final Slider zoomSlider = new Slider(0.5, 2.0, 1.0);
 
     /** JavaFX equivalent of the {@code .dot-pulse} animation in
@@ -218,11 +217,7 @@ public class PdfPreviewPane extends ViewPanel {
             //   left   = Refresh button
             //   center = loading dots (centered above the page area)
             //   right  = zoom controls
-            // statusLabel is intentionally NOT placed in the toolbar \u2014 the
-            // success / progress text was visually noisy and shoved the
-            // controls around when it appeared. The label still gets
-            // updated by setStatusLater() for any future surface that
-            // wants to show it (e.g. tooltip / log), but it isn't rendered.
+
             BorderPane toolbar = new BorderPane();
             toolbar.setLeft(refreshButton);
             toolbar.setCenter(loadingDots);
@@ -298,7 +293,6 @@ public class PdfPreviewPane extends ViewPanel {
             previous.cancel(false);
         }
         logger.debug("PDF preview render queued");
-        setStatusLater("Rendering\u2026");
         setLoading(true);
         Future<?> next = renderExecutor.submit(() -> {
             try {
@@ -312,30 +306,16 @@ public class PdfPreviewPane extends ViewPanel {
 
     private void renderNow() {
         try {
-            // Guard against being invoked before any tab is opened — the
-            // editor's JS context (`editor` variable) doesn't exist yet and
-            // currentEditorValue() would throw a JSException.
-            //
-            // We must also guard against the editor not yet having booted
-            // its JS even when a tab DOES exist. At app startup, restored
-            // tabs are present (with paths) before the Ace bootstrap HTML
-            // finishes loading inside the WebView, so executeScript would
-            // throw "ReferenceError: editor is not defined". The editor's
-            // `ready` BooleanProperty flips true once the JS init handler
-            // fires — until then, just defer; the next render trigger
-            // (first save / F5 / tab switch / edit) will pick it up.
             com.kodedu.component.MyTab tab = current.currentTab();
             if (tab == null || tab.getPath() == null) {
-                setStatusLater("Open a document to preview.");
                 return;
             }
+            // Editor JS may not have booted yet at startup (Ace bootstrap
+            // races the first render trigger). Defer and self-rearm via
+            // the readiness property; the listener removes itself on the
+            // first true-transition.
             com.kodedu.component.EditorPane editorPane = tab.getEditorPane();
             if (editorPane == null || !editorPane.getReady()) {
-                setStatusLater("Editor still loading…");
-                // One-shot hook: once the editor JS finishes booting, kick
-                // a render so the user sees the first preview without
-                // having to save / F5. Idempotent — the listener removes
-                // itself on first true-transition.
                 if (editorPane != null) {
                     final javafx.beans.property.BooleanProperty ready = editorPane.readyProperty();
                     final javafx.beans.value.ChangeListener<Boolean>[] holder =
@@ -352,18 +332,15 @@ public class PdfPreviewPane extends ViewPanel {
             }
             String asciidoc = current.currentEditorValue();
             if (asciidoc == null) {
-                setStatusLater("No active document.");
                 return;
             }
             Path masterAdoc = resolveMasterAdoc();
             if (masterAdoc == null) {
-                setStatusLater("PDF preview unavailable — no master adoc.");
                 return;
             }
             // Publish the resolved master so the file-tree cell factory
             // can paint a "MASTER" badge on the matching row.
-            Path masterFinal = masterAdoc;
-            Platform.runLater(() -> currentMaster.set(masterFinal));
+            Platform.runLater(() -> currentMaster.set(masterAdoc));
             Path activeFile = tab.getPath();
             PreviewScope scope = previewConfigBean.getPdfPreviewScope();
 
@@ -371,64 +348,41 @@ public class PdfPreviewPane extends ViewPanel {
                     PreviewSourceResolver.resolve(scope, masterAdoc, activeFile, asciidoc);
             logger.info("PDF preview render start: scope={} master={} active={}",
                     r.scopeUsed(), masterAdoc, activeFile);
+            if (r.notice() != null) {
+                logger.info("PDF preview: {}", r.notice());
+            }
 
             int hash = (r.scopeUsed().name() + "|" + r.source()).hashCode();
             if (hash == lastRenderHash && Files.size(tmpPdf) > 0) {
                 logger.debug("PDF preview unchanged since last render; reusing {}", tmpPdf);
-                setStatusLater("Up to date (" + r.scopeUsed() + ").");
                 return;
             }
 
             long t0 = System.currentTimeMillis();
             pdfRenderer.renderTo(r.source(), r.baseDir(), tmpPdf);
             lastRenderHash = hash;
-            long elapsed = System.currentTimeMillis() - t0;
-            String label = r.scopeUsed() + " preview \u00b7 " + elapsed + " ms"
-                    + (r.notice() != null ? " \u00b7 " + r.notice() : "");
-            logger.debug("PDF preview rendered ({}, {} ms)", r.scopeUsed(), elapsed);
+            logger.debug("PDF preview rendered ({}, {} ms)",
+                    r.scopeUsed(), System.currentTimeMillis() - t0);
 
-            rasterizeAndShow(label);
+            rasterizeAndShow();
 
-            // Asciidoctor-pdf can take seconds; the user usually keeps
-            // typing.  Compare the editor buffer NOW to the source we
-            // just rendered — if it has moved on, fire one more render
-            // so the visible PDF always converges on what's in the
-            // editor.  The lastRenderHash short-circuit above prevents
-            // an infinite loop when the buffer is unchanged.
-            try {
-                if (current.currentTab() == tab) {
-                    String latest = current.currentEditorValue();
-                    if (latest != null && !latest.equals(asciidoc)) {
-                        logger.debug("Editor changed during render; re-rendering to catch up");
-                        threadService.schedule(this::render, 50, java.util.concurrent.TimeUnit.MILLISECONDS);
-                    }
+            // Asciidoctor-pdf can take seconds; if the user kept typing
+            // during the render, fire one more so the visible PDF
+            // converges on the current editor buffer. lastRenderHash
+            // above prevents loops when nothing actually changed.
+            if (current.currentTab() == tab) {
+                String latest = current.currentEditorValue();
+                if (latest != null && !latest.equals(asciidoc)) {
+                    logger.debug("Editor changed during render; re-rendering to catch up");
+                    threadService.schedule(this::render, 50, java.util.concurrent.TimeUnit.MILLISECONDS);
                 }
-            } catch (Exception ignored) {
-                // Reading the editor here is best-effort; never let it
-                // mask a successful render.
             }
         } catch (Exception e) {
-            // "ReferenceError: editor is not defined" / NPE chains can still
-            // squeak through if a render is queued in the tiny window after
-            // the readiness check but before executeScript runs on the FX
-            // thread. Treat that specific class of failure as a quiet defer
-            // rather than a noisy WARN — there's nothing the user can do.
-            String msg = String.valueOf(e.getMessage());
-            if (msg.contains("editor is not defined")
-                    || msg.contains("ReferenceError")) {
-                logger.debug("PDF preview deferred — editor JS not ready yet", e);
-                setStatusLater("Editor still loading…");
-            } else {
-                logger.warn("PDF preview render failed (keeping previous pages visible)", e);
-                setStatusLater("Render failed: " + e.getMessage());
-            }
+            logger.warn("PDF preview render failed (keeping previous pages visible)", e);
         }
     }
 
     private Path resolveMasterAdoc() {
-        // Heuristic: walk up from the active file's parent looking for a
-        // .asciidoctorconfig (the project marker) and pick the longest .adoc
-        // file in that directory as the master.
         if (current.currentTab() == null) {
             return null;
         }
@@ -436,21 +390,28 @@ public class PdfPreviewPane extends ViewPanel {
         if (active == null) {
             return null;
         }
-        Path workdir = current.currentTab().getParentOrWorkdir();
-        if (workdir == null) {
+        Path projectDir = findProjectDir(current.currentTab().getParentOrWorkdir());
+        if (projectDir == null) {
             return active;
         }
-        Path dir = workdir;
+        Path candidate = pickMasterIn(projectDir, active);
+        return candidate != null ? candidate : active;
+    }
+
+    /**
+     * Walk up from {@code start} looking for {@code .asciidoctorconfig}
+     * (the project marker). Returns null if no marker is found within
+     * 10 levels.
+     */
+    private static Path findProjectDir(Path start) {
+        Path dir = start;
         for (int i = 0; i < 10 && dir != null; i++, dir = dir.getParent()) {
             if (Files.exists(dir.resolve(".asciidoctorconfig"))
                     || Files.exists(dir.resolve(".asciidoctorconfig.adoc"))) {
-                Path candidate = pickMasterIn(dir, active);
-                if (candidate != null) {
-                    return candidate;
-                }
+                return dir;
             }
         }
-        return active;
+        return null;
     }
 
     private Path pickMasterIn(Path projectDir, Path active) {
@@ -592,21 +553,8 @@ public class PdfPreviewPane extends ViewPanel {
         }
         renderExecutor.submit(() -> {
             try {
-                Path workdir = activeFile.getParent();
-                if (workdir == null) {
-                    return;
-                }
-                Path dir = workdir;
-                Path resolved = null;
-                for (int i = 0; i < 10 && dir != null; i++, dir = dir.getParent()) {
-                    if (Files.exists(dir.resolve(".asciidoctorconfig"))
-                            || Files.exists(dir.resolve(".asciidoctorconfig.adoc"))) {
-                        resolved = pickMasterIn(dir, activeFile);
-                        if (resolved != null) {
-                            break;
-                        }
-                    }
-                }
+                Path projectDir = findProjectDir(activeFile.getParent());
+                Path resolved = projectDir != null ? pickMasterIn(projectDir, activeFile) : null;
                 if (resolved == null) {
                     resolved = activeFile;
                 }
@@ -618,7 +566,7 @@ public class PdfPreviewPane extends ViewPanel {
         });
     }
 
-    private void rasterizeAndShow(String statusText) {
+    private void rasterizeAndShow() {
         float dpi = (float) (BASE_DPI * zoomSlider.getValue());
         List<Image> images = rasterizePages(dpi);
         Platform.runLater(() -> {
@@ -628,7 +576,6 @@ public class PdfPreviewPane extends ViewPanel {
                 view.setPreserveRatio(true);
                 pagesBox.getChildren().add(view);
             }
-            statusLabel.setText(statusText + " · " + images.size() + " pages");
         });
     }
 
@@ -640,8 +587,7 @@ public class PdfPreviewPane extends ViewPanel {
         } catch (Exception ignored) {
             return;
         }
-        renderExecutor.submit(() ->
-                rasterizeAndShow(String.format("Zoom %.1fx", zoomSlider.getValue())));
+        renderExecutor.submit(this::rasterizeAndShow);
     }
 
     private List<Image> rasterizePages(float dpi) {
@@ -657,10 +603,6 @@ public class PdfPreviewPane extends ViewPanel {
             logger.warn("PDF rasterize failed", e);
         }
         return images;
-    }
-
-    private void setStatusLater(String text) {
-        Platform.runLater(() -> statusLabel.setText(text));
     }
 
     @Override

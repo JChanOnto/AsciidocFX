@@ -116,6 +116,13 @@ public final class MasterDocResolver {
      * start node itself). Bounded by {@link #MAX_DEPTH} and a visited-set
      * to handle cycles.
      */
+    public static boolean isReachable(Path start, Path target) {
+        if (start == null || target == null) {
+            return false;
+        }
+        return reaches(start, target.toAbsolutePath().normalize());
+    }
+
     private static boolean reaches(Path start, Path targetAbs) {
         Path startAbs = start.toAbsolutePath().normalize();
         if (startAbs.equals(targetAbs)) {

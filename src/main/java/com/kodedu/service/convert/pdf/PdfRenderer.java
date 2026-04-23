@@ -128,15 +128,6 @@ public class PdfRenderer {
                 .build();
         String content = ExtensionPreprocessor.correctExtensionBlocks(asciidoc);
         org.asciidoctor.Asciidoctor doctor = getNonHtmlDoctor();
-        // Block until SpringAppConfig.nonHtmlDoctor()'s async require of
-        // asciidoctor-pdf has actually finished.  The doctor-readiness
-        // latch only signals "bean resolvable" — the gem load happens on
-        // a separate virtual thread and can still be in flight when the
-        // first preview render lands, producing
-        //   "missing converter for backend 'pdf'"
-        // from update_backend_attributes.  This latch is the canonical
-        // signal that the converter is registered and convert() is safe.
-        com.kodedu.service.AsciidoctorFactory.waitForPdfBackend();
         synchronized (doctor) {
             doctor.convert(content, options);
         }
