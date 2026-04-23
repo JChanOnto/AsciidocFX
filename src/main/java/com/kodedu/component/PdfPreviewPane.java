@@ -423,7 +423,11 @@ public class PdfPreviewPane extends ViewPanel {
 
     private javafx.scene.control.TreeItem<PdfOutlineEntry> toTreeItem(PdfOutlineEntry e) {
         javafx.scene.control.TreeItem<PdfOutlineEntry> ti = new javafx.scene.control.TreeItem<>(e);
-        ti.setExpanded(true);
+        // Default-collapsed: only top-level entries are visible after a
+        // fresh render; the user expands subsections on demand.  Big
+        // books (200+ pages, deep section trees) become navigable
+        // without an immediate wall of nested entries.
+        ti.setExpanded(false);
         for (PdfOutlineEntry c : e.children()) {
             ti.getChildren().add(toTreeItem(c));
         }

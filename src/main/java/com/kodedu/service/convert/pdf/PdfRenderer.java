@@ -179,8 +179,12 @@ public class PdfRenderer {
 
     /**
      * Shell out to a CRuby {@code asciidoctor-pdf}.  The source is written to
-     * a temp file inside {@code baseDir} so {@code include::}, {@code imagesdir},
-     * and {@code {docdir}} resolve identically to the in-process path.
+     * a temp file in the system temp dir (NOT inside {@code baseDir} — that
+     * pollutes the user's project, can leak into VCS, and litters the
+     * working tree if the process is killed mid-render).  The CLI's
+     * {@code --base-dir} flag is set explicitly to {@code baseDir} so
+     * {@code include::}, {@code imagesdir}, and {@code {docdir}} resolve
+     * identically to the in-process path.
      *
      * <p>Every attribute the JRuby path would have applied is forwarded as a
      * {@code -a name=value} flag, so theme, diagram cache dir, and any
@@ -190,11 +194,15 @@ public class PdfRenderer {
         String content = ExtensionPreprocessor.correctExtensionBlocks(asciidoc);
         Path tmpInput = null;
         try {
-            tmpInput = Files.createTempFile(baseDir, "afx-render-", ".adoc");
+            tmpInput = Files.createTempFile("afx-render-", ".adoc");
             Files.writeString(tmpInput, content, StandardCharsets.UTF_8);
 
             List<String> argv = new ArrayList<>(command);
             argv.add("-r"); argv.add("asciidoctor-diagram");
+            // Pin the resource-resolution root to the renderer's contract
+            // baseDir (typically the master document's parent), independent
+            // of where the temp wrapper happens to live on disk.
+            argv.add("--base-dir"); argv.add(baseDir.toAbsolutePath().toString());
 
             // Mirror the JRuby path (AsciidoctorFactory): auto-discover and
             // require any project Ruby extensions (.asciidoctorconfig

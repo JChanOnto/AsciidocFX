@@ -322,10 +322,21 @@ public abstract class AsciidoctorConfigBase<T extends LoadedAttributes> extends 
         MyTab currentTab = controller.getCurrent().currentTab();
         Path path = currentTab.getPath();
         String pathText = Objects.nonNull(path) ? path.toString() : null;
+        // parseHeaderOnly: we only need the header attribute table to
+        // forward to the actual render.  A full parse would resolve
+        // include:: directives — and for chapter-mode wrappers, the
+        // currentTab's parent dir is *not* the correct baseDir for
+        // those includes (the renderer uses the master's parent
+        // instead).  A full parse here therefore logs spurious
+        // "include file not found" errors against doubled paths like
+        // sections/sections/_attributes.adoc.  Header-only parsing
+        // skips include resolution entirely while still yielding the
+        // attribute map we need.
         Document document = getPlainDoctor().load(asciidoc, Options.builder()
                 .backend(getBackend())
                 .safe(SafeMode.UNSAFE)
                 .sourcemap(true)
+                .parseHeaderOnly(true)
                 .baseDir(currentTab.getParentOrWorkdir().toFile())
                 .attributes(Attributes.builder().allowUriRead(true).attribute(DOC_FILE_ATTR, pathText).build()).build());
         Map<String, Object> defaultAttributes = document.getAttributes();
