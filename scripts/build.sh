@@ -34,12 +34,12 @@ repo_root="$(cd "$script_dir/.." && pwd)"
 if (( ! skip_setup )); then
     setup_args=()
     (( with_ruby )) && setup_args+=("--with-ruby")
-    "$script_dir/setup.sh" "${setup_args[@]}"
+    "$script_dir/setup.sh" ${setup_args[@]+"${setup_args[@]}"}
 fi
 
 cd "$repo_root"
 echo "[build] mvn -P install4j-package clean package -DskipTests ${mvn_extra[*]:-}"
-mvn -P install4j-package clean package -DskipTests "${mvn_extra[@]}"
+mvn -P install4j-package clean package -DskipTests ${mvn_extra[@]+"${mvn_extra[@]}"}
 
 cat <<'EOF'
 
