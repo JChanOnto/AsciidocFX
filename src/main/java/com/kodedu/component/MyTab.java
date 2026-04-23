@@ -284,6 +284,17 @@ public class MyTab extends Tab {
     }
 
     public void saveDoc() {
+        // saveAllTabs() on window blur fans out to every tab, including
+        // tabs whose Ace editor JS hasn't initialized yet (tab was
+        // never focused / lazy-loaded in the background).  Calling
+        // editorPane.getEditorValue() against an unready WebView
+        // evaluates `editor.getValue()` and throws
+        //   ReferenceError: Can't find variable: editor
+        // An unready editor by definition has no user edits, so there
+        // is nothing to save - skip.
+        if (!isReady()) {
+            return;
+        }
         threadService.runActionLater(() -> {
             save();
             if (fileHistoryConfigBean.isSaveOnEachFileSave()) {
