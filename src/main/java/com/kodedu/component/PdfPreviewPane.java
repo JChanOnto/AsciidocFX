@@ -796,14 +796,20 @@ public class PdfPreviewPane extends ViewPanel {
             }
         });
 
-        // Phase 3: stream-rasterise.  Open the PDF once, render pages in
-        // order, hand each rendered Image off to the FX thread to swap
-        // into the corresponding placeholder.  Bail out the moment a
-        // newer generation supersedes us.
+        // Phase 3: stream-rasterise.  Render priority order:
+        //   visible page first (so the user sees what they were looking
+        //   at almost immediately on a reload / debounce / zoom-up),
+        //   then expand outward one page above and one below in
+        //   alternation, then fall through to any remaining pages.  On
+        //   a fresh open the visible page is page 0, so this naturally
+        //   degenerates to top-to-bottom.  A newer-generation token
+        //   abandons the loop the moment a fresh render is queued.
+        int anchor = currentVisiblePageIndex(pageCount);
+        java.util.List<Integer> order = priorityOrder(anchor, pageCount);
+
         try (PDDocument doc = Loader.loadPDF(tmpPdf.toFile())) {
             PDFRenderer renderer = new PDFRenderer(doc);
-            int n = doc.getNumberOfPages();
-            for (int i = 0; i < n; i++) {
+            for (int i : order) {
                 if (gen != renderGeneration.get()) {
                     return;
                 }
@@ -821,6 +827,71 @@ public class PdfPreviewPane extends ViewPanel {
         } catch (Exception e) {
             logger.warn("PDF rasterize failed", e);
         }
+    }
+
+    /**
+     * Best-effort estimate of the page index the user is currently
+     * looking at, derived from the {@link #scrollPane} scroll position
+     * and the cached page heights.  Falls back to 0 (top of document)
+     * when no pages have been laid out yet (i.e. fresh open) or when
+     * called off the FX thread before the layout settles.
+     *
+     * <p>Reading from a non-FX thread is safe-ish: {@code Vvalue} is a
+     * volatile-ish DoubleProperty; we tolerate a slightly stale value
+     * because the priority order is only an optimisation hint, not a
+     * correctness invariant.
+     */
+    private int currentVisiblePageIndex(int pageCount) {
+        if (pageCount <= 0) return 0;
+        double v;
+        try {
+            v = scrollPane.getVvalue();
+        } catch (Exception ignored) {
+            return 0;
+        }
+        // Vvalue ranges 0..1 across the scrollable region.  Estimate
+        // the corresponding page index by walking cumulative page
+        // heights at the current zoom until we cross the target Y.
+        double zoom = zoomSlider.getValue();
+        double total = 0.0;
+        java.util.List<Double> heights;
+        synchronized (cachedImages) {
+            heights = new java.util.ArrayList<>(cachedPagePtHeights);
+        }
+        if (heights.isEmpty()) return 0;
+        for (Double h : heights) {
+            total += h * BASE_DPI / 72.0 * zoom + pagesBox.getSpacing();
+        }
+        double targetY = v * total;
+        double cum = 0.0;
+        for (int i = 0; i < heights.size(); i++) {
+            cum += heights.get(i) * BASE_DPI / 72.0 * zoom + pagesBox.getSpacing();
+            if (cum >= targetY) {
+                return Math.min(i, pageCount - 1);
+            }
+        }
+        return Math.min(pageCount - 1, Math.max(0, heights.size() - 1));
+    }
+
+    /**
+     * Build a render-priority order anchored at {@code anchor}: anchor
+     * first, then anchor-1, anchor+1, anchor-2, anchor+2, ...  Pages
+     * outside [0, pageCount) are skipped.  Returns a stable list whose
+     * size equals {@code pageCount}.
+     */
+    static java.util.List<Integer> priorityOrder(int anchor, int pageCount) {
+        java.util.List<Integer> order = new java.util.ArrayList<>(pageCount);
+        if (pageCount <= 0) return order;
+        int a = Math.max(0, Math.min(pageCount - 1, anchor));
+        order.add(a);
+        for (int radius = 1; order.size() < pageCount; radius++) {
+            int below = a - radius;
+            int above = a + radius;
+            if (below >= 0) order.add(below);
+            if (above < pageCount) order.add(above);
+            if (below < 0 && above >= pageCount) break;
+        }
+        return order;
     }
 
     /**
