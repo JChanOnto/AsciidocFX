@@ -320,28 +320,50 @@ public abstract class AsciidoctorConfigBase<T extends LoadedAttributes> extends 
 
     public Attributes getAsciiDocAttributes(String asciidoc) {
         MyTab currentTab = controller.getCurrent().currentTab();
-        Path path = currentTab.getPath();
-        String pathText = Objects.nonNull(path) ? path.toString() : null;
-        // parseHeaderOnly: we only need the header attribute table to
-        // forward to the actual render.  A full parse would resolve
-        // include:: directives — and for chapter-mode wrappers, the
-        // currentTab's parent dir is *not* the correct baseDir for
-        // those includes (the renderer uses the master's parent
-        // instead).  A full parse here therefore logs spurious
-        // "include file not found" errors against doubled paths like
-        // sections/sections/_attributes.adoc.  Header-only parsing
-        // skips include resolution entirely while still yielding the
-        // attribute map we need.
+        return getAsciiDocAttributes(asciidoc, currentTab.getParentOrWorkdir());
+    }
+
+    /**
+     * Overload that takes an explicit {@code baseDir} for the header-extraction
+     * parse.  Callers that synthesise wrapper documents (e.g. the PDF
+     * preview's chapter-mode wrapper, which embeds the master's
+     * {@code include::} lines but lives in memory unattached to the
+     * chapter file on disk) MUST pass the baseDir they will use for the
+     * real render — otherwise asciidoctor resolves any {@code include::}
+     * directive it encounters against {@code currentTab}'s parent,
+     * which for a chapter file is the chapter's own folder.  That
+     * produces "include file not found" errors against doubled paths
+     * like {@code sections/sections/_attributes.adoc} and surfaces them
+     * stamped with the chapter file's name (because {@code docfile}
+     * points at the chapter).
+     *
+     * <p>{@code parseHeaderOnly(true)} does <em>not</em> guarantee
+     * skipping includes: when an {@code include::} directive sits
+     * between header attributes (or before the first body block), the
+     * parser reads it to keep attribute discovery correct.  So the
+     * baseDir we hand the parser has to be right, not just the
+     * renderer's.
+     *
+     * <p>Also: we do NOT set {@code docfile} to the currentTab path
+     * here.  In wrapper renders the wrapper is not the current tab, and
+     * leaking the chapter's docfile caused it to show up as the error
+     * source in asciidoctor diagnostics.  The render-time attribute
+     * map strips all {@link #INTRINSIC_LOCATION_ATTRS} anyway.
+     */
+    public Attributes getAsciiDocAttributes(String asciidoc, Path baseDir) {
+        Path effectiveBase = Objects.nonNull(baseDir)
+                ? baseDir
+                : controller.getCurrent().currentTab().getParentOrWorkdir();
         Document document = getPlainDoctor().load(asciidoc, Options.builder()
                 .backend(getBackend())
                 .safe(SafeMode.UNSAFE)
                 .sourcemap(true)
                 .parseHeaderOnly(true)
-                .baseDir(currentTab.getParentOrWorkdir().toFile())
-                .attributes(Attributes.builder().allowUriRead(true).attribute(DOC_FILE_ATTR, pathText).build()).build());
+                .baseDir(effectiveBase.toFile())
+                .attributes(Attributes.builder().allowUriRead(true).build()).build());
         Map<String, Object> defaultAttributes = document.getAttributes();
 
-        return getAsciiDocAttributes(defaultAttributes, currentTab.getParentOrWorkdir());
+        return getAsciiDocAttributes(defaultAttributes, effectiveBase);
     }
 
     public Attributes getAsciiDocAttributes(Map<String, Object> originalDocAttributes) {

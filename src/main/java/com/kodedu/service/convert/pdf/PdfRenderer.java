@@ -153,7 +153,13 @@ public class PdfRenderer {
     private void renderViaJRuby(String asciidoc, Path baseDir, Path outPdf) {
         File destFile = outPdf.toFile();
         SafeMode safe = convertSafe(pdfConfigBean.getSafe());
-        Attributes attributes = pdfConfigBean.getAsciiDocAttributes(asciidoc);
+        // Pass the renderer's true baseDir (master's parent in chapter
+        // mode) into the header-extraction parse.  Without this, the
+        // header parse of a chapter-mode wrapper resolves its embedded
+        // `include::sections/_attributes.adoc[]` against the active
+        // tab's folder (the chapter dir itself) and reports a spurious
+        // "include file not found: .../sections/sections/_attributes.adoc".
+        Attributes attributes = pdfConfigBean.getAsciiDocAttributes(asciidoc, baseDir);
         // Defence in depth: re-strip any leaked docdir/docfile/etc. before
         // they can override the explicit baseDir below.
         Attributes safeAttributes = Attributes.builder().build();
@@ -226,7 +232,12 @@ public class PdfRenderer {
                 argv.add("-s");
             }
 
-            Attributes attrs = pdfConfigBean.getAsciiDocAttributes(asciidoc);
+            // Same baseDir-correct header parse as renderViaJRuby: see
+            // comment there.  The external CLI path previously inherited
+            // the active tab's parent for this parse, producing a spurious
+            // "include file not found: .../sections/sections/_attributes.adoc"
+            // for chapter-mode wrappers.
+            Attributes attrs = pdfConfigBean.getAsciiDocAttributes(asciidoc, baseDir);
             // Defence in depth: matches the renderViaJRuby strip — the
             // external CLI honours -a docdir=... by overriding the resolved
             // base dir, which would re-introduce the include-resolution bug.
