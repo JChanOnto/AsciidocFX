@@ -109,11 +109,33 @@ public class PdfPreviewPane extends ViewPanel {
     private volatile float cachedImagesDpi = BASE_DPI;
     /** Page widths in PDF points, used to scale ImageViews instantly on zoom. */
     private final List<Double> cachedPagePtWidths = new ArrayList<>();
+    /** Page heights in PDF points, used to size placeholders before rasterise. */
+    private final List<Double> cachedPagePtHeights = new ArrayList<>();
     /** Debounce timer for the heavy re-rasterise. Run on FX thread. */
     private javafx.animation.PauseTransition zoomDebounce;
     /** Tracks whether a re-rasterise is currently in flight on the executor. */
     private final java.util.concurrent.atomic.AtomicBoolean reraserizing =
             new java.util.concurrent.atomic.AtomicBoolean(false);
+
+    /**
+     * Generation counter incremented on every fresh render or reraster.
+     * Background tasks check this before publishing their result so a
+     * slow page-N rasterise from generation G doesn't overwrite a
+     * placeholder belonging to generation G+1.
+     */
+    private final java.util.concurrent.atomic.AtomicInteger renderGeneration =
+            new java.util.concurrent.atomic.AtomicInteger(0);
+
+    /** A page outline entry extracted from the rendered PDF's bookmarks tree. */
+    public record PdfOutlineEntry(String title, int pageIndex,
+                                  java.util.List<PdfOutlineEntry> children) {}
+
+    /** Bookmarks for the currently-displayed PDF; rebuilt on every successful render. */
+    private final List<PdfOutlineEntry> currentOutline =
+            java.util.Collections.synchronizedList(new ArrayList<>());
+
+    private javafx.scene.control.TreeView<PdfOutlineEntry> outlineTree;
+    private javafx.scene.control.SplitPane splitPane;
 
     /**
      * User's explicit master choice for an ambiguous chapter.  Keyed by
@@ -216,11 +238,21 @@ public class PdfPreviewPane extends ViewPanel {
             });
 
             buildLoadingDots();
+            buildOutlineTree();
 
             Button refreshButton = new Button("Refresh");
             refreshButton.setTooltip(new javafx.scene.control.Tooltip(
                     "Re-render the PDF preview now (F5)"));
             refreshButton.setOnAction(e -> render());
+
+            // Outline toggle button — show/hide the bookmark navigation
+            // panel.  Shown by default for any document with > 1 page;
+            // collapsing the divider hides it without losing state.
+            javafx.scene.control.ToggleButton outlineToggle =
+                    new javafx.scene.control.ToggleButton("Outline");
+            outlineToggle.setTooltip(new javafx.scene.control.Tooltip(
+                    "Show / hide the PDF outline navigation panel"));
+            outlineToggle.setSelected(true);
 
             // Zoom group: [\u2212] [---slider---] [+]
             // Step is a single tick of the slider's blockIncrement, clamped
@@ -242,21 +274,124 @@ public class PdfPreviewPane extends ViewPanel {
             zoomGroup.setAlignment(Pos.CENTER_RIGHT);
 
             // Three-region toolbar via BorderPane:
-            //   left   = Refresh button
+            //   left   = Refresh + Outline toggle
             //   center = loading dots (centered above the page area)
             //   right  = zoom controls
 
+            HBox leftGroup = new HBox(6, refreshButton, outlineToggle);
+            leftGroup.setAlignment(Pos.CENTER_LEFT);
             BorderPane toolbar = new BorderPane();
-            toolbar.setLeft(refreshButton);
+            toolbar.setLeft(leftGroup);
             toolbar.setCenter(loadingDots);
             toolbar.setRight(zoomGroup);
-            BorderPane.setAlignment(refreshButton, Pos.CENTER_LEFT);
+            BorderPane.setAlignment(leftGroup, Pos.CENTER_LEFT);
             BorderPane.setAlignment(loadingDots, Pos.CENTER);
             BorderPane.setAlignment(zoomGroup, Pos.CENTER_RIGHT);
             toolbar.setPadding(new Insets(4, 8, 4, 8));
 
+            // SplitPane: outline (left) | pages scroll (right).
+            // Divider position remembered across render-driven rebuilds
+            // because we mutate items, never rebuild the SplitPane itself.
+            splitPane = new javafx.scene.control.SplitPane(outlineTree, scrollPane);
+            splitPane.setDividerPositions(0.22);
+            javafx.scene.control.SplitPane.setResizableWithParent(outlineTree, false);
+
+            outlineToggle.selectedProperty().addListener((obs, was, is) -> {
+                if (Boolean.TRUE.equals(is)) {
+                    if (!splitPane.getItems().contains(outlineTree)) {
+                        splitPane.getItems().add(0, outlineTree);
+                        splitPane.setDividerPositions(0.22);
+                    }
+                } else {
+                    splitPane.getItems().remove(outlineTree);
+                }
+            });
+
             root.setTop(toolbar);
-            root.setCenter(scrollPane);
+            root.setCenter(splitPane);
+        });
+    }
+
+    /**
+     * Build the outline TreeView. Empty until the first render populates it.
+     * Selecting an entry scrolls the page area to the entry's page index.
+     */
+    private void buildOutlineTree() {
+        javafx.scene.control.TreeItem<PdfOutlineEntry> root =
+                new javafx.scene.control.TreeItem<>(new PdfOutlineEntry("Outline", -1, java.util.List.of()));
+        root.setExpanded(true);
+        outlineTree = new javafx.scene.control.TreeView<>(root);
+        outlineTree.setShowRoot(false);
+        outlineTree.setMinWidth(0);
+        outlineTree.setPrefWidth(220);
+        outlineTree.setCellFactory(tv -> new javafx.scene.control.TreeCell<PdfOutlineEntry>() {
+            @Override
+            protected void updateItem(PdfOutlineEntry item, boolean empty) {
+                super.updateItem(item, empty);
+                if (empty || item == null) {
+                    setText(null);
+                    return;
+                }
+                if (item.pageIndex() >= 0) {
+                    setText(item.title() + "  \u00b7  p" + (item.pageIndex() + 1));
+                } else {
+                    setText(item.title());
+                }
+            }
+        });
+        outlineTree.getSelectionModel().selectedItemProperty().addListener((obs, was, is) -> {
+            if (is != null && is.getValue() != null && is.getValue().pageIndex() >= 0) {
+                scrollToPage(is.getValue().pageIndex());
+            }
+        });
+    }
+
+    /**
+     * Replace the outline tree contents with the freshly-extracted PDF outline.
+     * Empty list collapses the panel to a hint.
+     */
+    private void publishOutline(List<PdfOutlineEntry> entries) {
+        Platform.runLater(() -> {
+            javafx.scene.control.TreeItem<PdfOutlineEntry> root = outlineTree.getRoot();
+            root.getChildren().clear();
+            if (entries.isEmpty()) {
+                root.getChildren().add(new javafx.scene.control.TreeItem<>(
+                        new PdfOutlineEntry("(no outline in this PDF)", -1, java.util.List.of())));
+                return;
+            }
+            for (PdfOutlineEntry e : entries) {
+                root.getChildren().add(toTreeItem(e));
+            }
+        });
+    }
+
+    private javafx.scene.control.TreeItem<PdfOutlineEntry> toTreeItem(PdfOutlineEntry e) {
+        javafx.scene.control.TreeItem<PdfOutlineEntry> ti = new javafx.scene.control.TreeItem<>(e);
+        ti.setExpanded(true);
+        for (PdfOutlineEntry c : e.children()) {
+            ti.getChildren().add(toTreeItem(c));
+        }
+        return ti;
+    }
+
+    /**
+     * Scroll the page area so the top of the requested page is in view.
+     * Uses the cumulative height of preceding pages (incl. VBox spacing)
+     * normalised against the scrollable content height.
+     */
+    private void scrollToPage(int pageIndex) {
+        if (pageIndex < 0 || pageIndex >= pagesBox.getChildren().size()) {
+            return;
+        }
+        // Defer to next pulse so layout has the up-to-date bounds.
+        Platform.runLater(() -> {
+            javafx.scene.Node target = pagesBox.getChildren().get(pageIndex);
+            double targetY = target.getBoundsInParent().getMinY();
+            double contentHeight = pagesBox.getBoundsInLocal().getHeight();
+            double viewportHeight = scrollPane.getViewportBounds().getHeight();
+            double scrollable = Math.max(1.0, contentHeight - viewportHeight);
+            double v = Math.max(0.0, Math.min(1.0, targetY / scrollable));
+            scrollPane.setVvalue(v);
         });
     }
 
@@ -594,40 +729,206 @@ public class PdfPreviewPane extends ViewPanel {
         });
     }
 
+    /**
+     * Stream the PDF pages to the UI: render page-by-page on the
+     * executor, and replace each placeholder ImageView on the FX thread
+     * as soon as its raster is ready.  This means the user sees page 1
+     * within ~hundreds of milliseconds even on a 200-page book, rather
+     * than waiting for the whole document to rasterise before anything
+     * appears.
+     *
+     * <p>Each call increments {@link #renderGeneration}; in-flight tasks
+     * from a previous generation drop their results so they can't
+     * overwrite the new placeholders.
+     */
     private void rasterizeAndShow() {
-        double zoom = zoomSlider.getValue();
-        float dpi = (float) (BASE_DPI * zoom);
-        RasterizeResult res = rasterizePages(dpi);
+        final int gen = renderGeneration.incrementAndGet();
+        final double zoom = zoomSlider.getValue();
+        final float dpi = (float) (BASE_DPI * zoom);
+
+        // Phase 1 (cheap): open the PDF, read page metadata + outline,
+        // close it.  This drives the placeholder layout and the outline
+        // tree, both of which we want visible immediately.
+        List<Double> widths = new ArrayList<>();
+        List<Double> heights = new ArrayList<>();
+        List<PdfOutlineEntry> outline = java.util.List.of();
+        int pageCount;
+        try (PDDocument doc = Loader.loadPDF(tmpPdf.toFile())) {
+            pageCount = doc.getNumberOfPages();
+            for (int i = 0; i < pageCount; i++) {
+                widths.add((double) doc.getPage(i).getMediaBox().getWidth());
+                heights.add((double) doc.getPage(i).getMediaBox().getHeight());
+            }
+            outline = extractOutline(doc);
+        } catch (Exception e) {
+            logger.warn("PDF metadata load failed", e);
+            return;
+        }
+
         synchronized (cachedImages) {
             cachedImages.clear();
-            cachedImages.addAll(res.images);
+            for (int i = 0; i < pageCount; i++) {
+                cachedImages.add(null);
+            }
             cachedPagePtWidths.clear();
-            cachedPagePtWidths.addAll(res.pageWidthsPt);
+            cachedPagePtWidths.addAll(widths);
+            cachedPagePtHeights.clear();
+            cachedPagePtHeights.addAll(heights);
             cachedImagesDpi = dpi;
+            currentOutline.clear();
+            currentOutline.addAll(outline);
         }
-        Platform.runLater(() -> populatePagesBox(zoom));
+
+        publishOutline(outline);
+
+        // Phase 2: build placeholders on the FX thread sized to the
+        // page's PDF media box.  The user sees the correct document
+        // length and page positions instantly so the scrollbar is
+        // accurate before any pixel data lands.
+        final List<Double> finalWidths = widths;
+        final List<Double> finalHeights = heights;
+        Platform.runLater(() -> {
+            if (gen != renderGeneration.get()) return;
+            pagesBox.getChildren().clear();
+            for (int i = 0; i < pageCount; i++) {
+                pagesBox.getChildren().add(
+                        buildPlaceholder(finalWidths.get(i), finalHeights.get(i), zoom));
+            }
+        });
+
+        // Phase 3: stream-rasterise.  Open the PDF once, render pages in
+        // order, hand each rendered Image off to the FX thread to swap
+        // into the corresponding placeholder.  Bail out the moment a
+        // newer generation supersedes us.
+        try (PDDocument doc = Loader.loadPDF(tmpPdf.toFile())) {
+            PDFRenderer renderer = new PDFRenderer(doc);
+            int n = doc.getNumberOfPages();
+            for (int i = 0; i < n; i++) {
+                if (gen != renderGeneration.get()) {
+                    return;
+                }
+                BufferedImage bim = renderer.renderImageWithDPI(i, dpi);
+                Image fxImg = SwingFXUtils.toFXImage(bim, null);
+                synchronized (cachedImages) {
+                    if (i < cachedImages.size()) cachedImages.set(i, fxImg);
+                }
+                final int idx = i;
+                Platform.runLater(() -> {
+                    if (gen != renderGeneration.get()) return;
+                    swapPlaceholder(idx, fxImg, zoom);
+                });
+            }
+        } catch (Exception e) {
+            logger.warn("PDF rasterize failed", e);
+        }
+    }
+
+    /**
+     * Build a placeholder Region sized to the PDF page's media box at
+     * the requested zoom.  Light grey background with a centered
+     * "Loading\u2026 page N" label \u2014 the user sees document
+     * structure (correct page sizes, scrollbar length) before any
+     * pixels arrive.
+     */
+    private javafx.scene.Node buildPlaceholder(double widthPt, double heightPt, double zoom) {
+        double w = widthPt * BASE_DPI / 72.0 * zoom;
+        double h = heightPt * BASE_DPI / 72.0 * zoom;
+        javafx.scene.layout.StackPane sp = new javafx.scene.layout.StackPane();
+        sp.setPrefSize(w, h);
+        sp.setMinSize(w, h);
+        sp.setMaxSize(w, h);
+        sp.setStyle("-fx-background-color: #f5f5f5; -fx-border-color: #d0d0d0;");
+        Label loading = new Label("Loading\u2026");
+        loading.setStyle("-fx-text-fill: #888;");
+        sp.getChildren().add(loading);
+        return sp;
+    }
+
+    /**
+     * Replace the placeholder at {@code idx} with an ImageView showing
+     * {@code img} sized for {@code zoom}.  No-op if the index is out of
+     * range (e.g. the layout has been rebuilt by a newer render).
+     */
+    private void swapPlaceholder(int idx, Image img, double zoom) {
+        if (idx < 0 || idx >= pagesBox.getChildren().size()) return;
+        if (idx >= cachedPagePtWidths.size()) return;
+        ImageView view = new ImageView(img);
+        view.setPreserveRatio(true);
+        double targetPx = cachedPagePtWidths.get(idx) * BASE_DPI / 72.0 * zoom;
+        view.setFitWidth(targetPx);
+        view.setSmooth(true);
+        view.setCache(true);
+        pagesBox.getChildren().set(idx, view);
+    }
+
+    /**
+     * Extract the PDF's outline ({@code /Outlines} dictionary) into a
+     * tree of {@link PdfOutlineEntry} for the navigation panel.
+     * asciidoctor-pdf populates this with section bookmarks, so we get
+     * a free chapter-by-chapter index.  Returns an empty list if the
+     * document has no outline.
+     */
+    private List<PdfOutlineEntry> extractOutline(PDDocument doc) {
+        org.apache.pdfbox.pdmodel.interactive.documentnavigation.outline.PDDocumentOutline rootOutline =
+                doc.getDocumentCatalog().getDocumentOutline();
+        if (rootOutline == null) return java.util.List.of();
+        List<PdfOutlineEntry> result = new ArrayList<>();
+        var item = rootOutline.getFirstChild();
+        while (item != null) {
+            PdfOutlineEntry entry = outlineItemToEntry(item, doc);
+            if (entry != null) result.add(entry);
+            item = item.getNextSibling();
+        }
+        return result;
+    }
+
+    private PdfOutlineEntry outlineItemToEntry(
+            org.apache.pdfbox.pdmodel.interactive.documentnavigation.outline.PDOutlineItem item,
+            PDDocument doc) {
+        String title = item.getTitle();
+        int pageIdx = -1;
+        try {
+            org.apache.pdfbox.pdmodel.PDPage destPage = item.findDestinationPage(doc);
+            if (destPage != null) {
+                pageIdx = doc.getPages().indexOf(destPage);
+            }
+        } catch (Exception ignored) {
+            // Some outline items lack resolvable destinations; show without page link.
+        }
+        List<PdfOutlineEntry> children = new ArrayList<>();
+        var child = item.getFirstChild();
+        while (child != null) {
+            PdfOutlineEntry sub = outlineItemToEntry(child, doc);
+            if (sub != null) children.add(sub);
+            child = child.getNextSibling();
+        }
+        if (title == null) title = "(untitled)";
+        return new PdfOutlineEntry(title, pageIdx, children);
     }
 
     /**
      * Replace the page nodes with ImageViews sized for the requested zoom
-     * level.  Uses the cached images; the underlying pixel data is the
-     * size {@link #cachedImagesDpi} was rendered at, but the displayed
-     * size is {@code pageWidthPt * zoom} (1 PDF pt = 1/72 inch, ImageView
-     * units are device pixels at 96 dpi, and {@link #BASE_DPI} = 96 so
-     * {@code displayPx = ptWidth * BASE_DPI / 72 * zoom}).
+     * level.  Used by re-rasterise (zoom-up sharper rerender); the
+     * underlying pixel data is the size {@link #cachedImagesDpi} was
+     * rendered at, but the displayed size is
+     * {@code pageWidthPt * zoom} (1 PDF pt = 1/72 inch).
      */
     private void populatePagesBox(double zoom) {
         synchronized (cachedImages) {
             pagesBox.getChildren().clear();
             for (int i = 0; i < cachedImages.size(); i++) {
-                ImageView view = new ImageView(cachedImages.get(i));
+                Image img = cachedImages.get(i);
+                if (img == null) {
+                    double wPt = i < cachedPagePtWidths.size() ? cachedPagePtWidths.get(i) : 612;
+                    double hPt = i < cachedPagePtHeights.size() ? cachedPagePtHeights.get(i) : 792;
+                    pagesBox.getChildren().add(buildPlaceholder(wPt, hPt, zoom));
+                    continue;
+                }
+                ImageView view = new ImageView(img);
                 view.setPreserveRatio(true);
                 if (i < cachedPagePtWidths.size()) {
                     double targetPx = cachedPagePtWidths.get(i) * BASE_DPI / 72.0 * zoom;
                     view.setFitWidth(targetPx);
-                    // Smooth interpolation when downscaling (zoom < cached);
-                    // disabled when upscaling so the user sees the
-                    // native pixel grid until the re-rasterise lands.
                     view.setSmooth(true);
                     view.setCache(true);
                 }
@@ -640,6 +941,8 @@ public class PdfPreviewPane extends ViewPanel {
      * O(n) walk over the displayed ImageViews adjusting their
      * {@code fitWidth} for the new zoom.  No PDFBox calls, no I/O —
      * this is what keeps the slider responsive while the user drags.
+     * Placeholders are rescaled too so document length stays correct
+     * before mid-render.
      */
     private void rescaleViewsInstantly(double zoom) {
         synchronized (cachedImages) {
@@ -649,8 +952,15 @@ public class PdfPreviewPane extends ViewPanel {
             int n = pagesBox.getChildren().size();
             for (int i = 0; i < n && i < cachedPagePtWidths.size(); i++) {
                 javafx.scene.Node node = pagesBox.getChildren().get(i);
+                double wPx = cachedPagePtWidths.get(i) * BASE_DPI / 72.0 * zoom;
                 if (node instanceof ImageView iv) {
-                    iv.setFitWidth(cachedPagePtWidths.get(i) * BASE_DPI / 72.0 * zoom);
+                    iv.setFitWidth(wPx);
+                } else if (node instanceof javafx.scene.layout.Region region
+                        && i < cachedPagePtHeights.size()) {
+                    double hPx = cachedPagePtHeights.get(i) * BASE_DPI / 72.0 * zoom;
+                    region.setPrefSize(wPx, hPx);
+                    region.setMinSize(wPx, hPx);
+                    region.setMaxSize(wPx, hPx);
                 }
             }
         }
@@ -686,26 +996,6 @@ public class PdfPreviewPane extends ViewPanel {
                 reraserizing.set(false);
             }
         });
-    }
-
-    /** Result bundle so {@link #rasterizePages} can return both the images and their PDF page widths. */
-    private record RasterizeResult(List<Image> images, List<Double> pageWidthsPt) {}
-
-    private RasterizeResult rasterizePages(float dpi) {
-        List<Image> images = new ArrayList<>();
-        List<Double> widths = new ArrayList<>();
-        try (PDDocument doc = Loader.loadPDF(tmpPdf.toFile())) {
-            PDFRenderer renderer = new PDFRenderer(doc);
-            int n = doc.getNumberOfPages();
-            for (int i = 0; i < n; i++) {
-                BufferedImage bim = renderer.renderImageWithDPI(i, dpi);
-                images.add(SwingFXUtils.toFXImage(bim, null));
-                widths.add((double) doc.getPage(i).getMediaBox().getWidth());
-            }
-        } catch (Exception e) {
-            logger.warn("PDF rasterize failed", e);
-        }
-        return new RasterizeResult(images, widths);
     }
 
     @Override
