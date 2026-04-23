@@ -91,6 +91,23 @@ jobs:
           choco install graphviz 7zip --no-progress -y
           npm install -g '@mermaid-js/mermaid-cli'
 
+      # ruby-build is required by scripts/internal/bundle_ruby_runtime.sh to
+      # compile a relocatable CRuby into ruby-runtime/<os>/.  On Linux it
+      # also needs a C toolchain + the standard set of CRuby build deps
+      # (libssl, libreadline, zlib, libffi, libyaml).  macOS gets these via
+      # the brew formula's transitive deps.
+      - name: Install ruby-build + CRuby build deps (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get install -y \
+            autoconf bison build-essential libssl-dev libyaml-dev \
+            libreadline-dev zlib1g-dev libncurses-dev libffi-dev libgdbm-dev
+          git clone --depth 1 https://github.com/rbenv/ruby-build.git "$HOME/.rbenv/plugins/ruby-build"
+
+      - name: Install ruby-build (macOS)
+        if: matrix.os == 'macos-latest'
+        run: brew install ruby-build
+
       # Run setup with --skip-prereqs / -SkipPrereqs to avoid re-installing the
       # toolchain (already provided above by setup-java / setup-node / brew /
       # apt / choco). This step downloads the JavaFX SDK and bundles a portable
