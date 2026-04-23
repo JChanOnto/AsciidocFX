@@ -1444,16 +1444,6 @@ public class PdfPreviewPane extends ViewPanel {
                 scrollPane.getVmin(), scrollPane.getVmax(),
                 pagesBoxFixedOverheadW(), pagesBoxFixedOverheadH());
 
-        logger.debug("zoom anchor: {} -> {}  cursorVp=({},{})  contentPt=({},{})"
-                + "  oldContent=({}x{})  vp=({}x{})  curH={} curV={}  newH={} newV={}",
-                oldZoom, newZoom,
-                cursorVpX, cursorVpY,
-                contentPoint.getX(), contentPoint.getY(),
-                oldContentW, oldContentH,
-                viewportW, viewportH,
-                currentH, currentV,
-                anchor.hvalue(), anchor.vvalue());
-
         zoomSlider.setValue(newZoom); // fires rescaleViewsInstantly + debounce
         // Force the new content size into the ScrollPane's sizing
         // model NOW so our setHvalue/setVvalue is interpreted against
@@ -1464,10 +1454,6 @@ public class PdfPreviewPane extends ViewPanel {
         scrollPane.layout();
         scrollPane.setHvalue(anchor.hvalue());
         scrollPane.setVvalue(anchor.vvalue());
-        logger.debug("zoom anchor applied: H={} V={} (post-layout content={}x{})",
-                scrollPane.getHvalue(), scrollPane.getVvalue(),
-                pagesBox.getLayoutBounds().getWidth(),
-                pagesBox.getLayoutBounds().getHeight());
     }
 
     /**
