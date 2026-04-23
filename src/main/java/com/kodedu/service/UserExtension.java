@@ -146,6 +146,7 @@ public class UserExtension {
                                     .stream()
                                     .filter(cc -> !cc.getName().contains("Asciidoctor::"))
                                     .filter(cc -> cc.subclasses(true).isEmpty()) // only load leaf classes
+                                    .filter(UserExtension::isNamedRubyClass)      // skip anon classes
                                     .forEach(cc -> {
                                         String className = cc.getName();
                                         String extensionType = c.getBaseName();
@@ -168,5 +169,44 @@ public class UserExtension {
                 logger.error("Loading {} extension has failed", rubyExtension, e);
             }
         }
+    }
+
+    /**
+     * True iff {@code cc} has a real Ruby constant name (e.g.
+     * {@code TrueadcDocs::CleanMermaidSvg::SomeProc}) we can pass to
+     * {@code const_get}.  False for anonymous classes — those produced by
+     * the block form of Asciidoctor's extension DSL such as
+     * <pre>{@code
+     *   Asciidoctor::Extensions.register do
+     *     treeprocessor do
+     *       process do |doc| ... end
+     *     end
+     *   end
+     * }</pre>
+     * which create a {@code Class.new(Treeprocessor)} subclass with no
+     * constant binding.  JRuby's {@link RubyClass#getName()} returns the
+     * inspect-style placeholder {@code "#<Class:0x1ad2db1c>"} for such
+     * classes — passing that to {@code rubyTreeprocessor(className)}
+     * generates Ruby like {@code const_get("#<Class:0x1ad2db1c>")}, which
+     * blows up with {@code (NameError) wrong constant name}.
+     *
+     * <p>The block-form extensions are <em>already</em> registered with
+     * Asciidoctor's global extension registry by the {@code register}
+     * block executed during {@link ExtensionGroup#loadRubyClass} — our
+     * subclass-walk only needs to pick up named-but-not-self-registered
+     * classes (the {@code class Foo < Treeprocessor; end} pattern).
+     *
+     * <p>The canonical Ruby check for an anonymous module/class is
+     * {@code module.name.nil?} — {@link RubyClass#getBaseName()} returns
+     * {@code null} in JRuby for the same condition.  Defensively also
+     * reject names starting with {@code "#<"} in case a future JRuby
+     * release returns the inspect string from {@code getBaseName()}.
+     */
+    private static boolean isNamedRubyClass(RubyClass cc) {
+        if (cc.getBaseName() == null) {
+            return false;
+        }
+        String name = cc.getName();
+        return name != null && !name.startsWith("#<");
     }
 }
