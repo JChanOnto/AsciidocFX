@@ -12,10 +12,6 @@ import com.kodedu.service.convert.pdf.PdfRenderer;
 import com.kodedu.service.preview.PreviewScope;
 import com.kodedu.service.preview.PreviewSourceResolver;
 import jakarta.annotation.PostConstruct;
-import javafx.animation.Animation;
-import javafx.animation.KeyFrame;
-import javafx.animation.KeyValue;
-import javafx.animation.Timeline;
 import javafx.application.Platform;
 import javafx.embed.swing.SwingFXUtils;
 import javafx.geometry.Insets;
@@ -29,8 +25,6 @@ import javafx.scene.image.ImageView;
 import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.VBox;
-import javafx.scene.paint.Color;
-import javafx.scene.shape.Circle;
 import javafx.util.Duration;
 import org.apache.pdfbox.Loader;
 import org.apache.pdfbox.pdmodel.PDDocument;
@@ -210,9 +204,10 @@ public class PdfPreviewPane extends ViewPanel {
 
     /** JavaFX equivalent of the {@code .dot-pulse} animation in
      *  {@code conf/public/css/three-dots.css}, shown while a render is
-     *  in flight.  Three small circles pulsing in sequence. */
-    private final HBox loadingDots = new HBox(6);
-    private final Timeline loadingTimeline = new Timeline();
+     *  in flight.  Reference-counted via {@link LoadingDotsAnimation}
+     *  so concurrent reasons (startup warm-up + render + Save→PDF)
+     *  share a single visual without one release clobbering another. */
+    private final LoadingDotsAnimation loadingDots = new LoadingDotsAnimation();
 
     @Autowired
     public PdfPreviewPane(ThreadService threadService,
@@ -296,7 +291,6 @@ public class PdfPreviewPane extends ViewPanel {
             scrollPane.vvalueProperty().addListener((obs, ov, nv) -> viewportDebounce.playFromStart());
             scrollPane.viewportBoundsProperty().addListener((obs, ov, nv) -> viewportDebounce.playFromStart());
 
-            buildLoadingDots();
             buildOutlineTree();
 
             Button refreshButton = new Button("Refresh");
@@ -341,10 +335,10 @@ public class PdfPreviewPane extends ViewPanel {
             leftGroup.setAlignment(Pos.CENTER_LEFT);
             BorderPane toolbar = new BorderPane();
             toolbar.setLeft(leftGroup);
-            toolbar.setCenter(loadingDots);
+            toolbar.setCenter(loadingDots.node());
             toolbar.setRight(zoomGroup);
             BorderPane.setAlignment(leftGroup, Pos.CENTER_LEFT);
-            BorderPane.setAlignment(loadingDots, Pos.CENTER);
+            BorderPane.setAlignment(loadingDots.node(), Pos.CENTER);
             BorderPane.setAlignment(zoomGroup, Pos.CENTER_RIGHT);
             toolbar.setPadding(new Insets(4, 8, 4, 8));
 
@@ -475,74 +469,23 @@ public class PdfPreviewPane extends ViewPanel {
         });
     }
 
-    /**
-     * Build the three-dot pulse animation (JavaFX equivalent of
-     * {@code .dot-pulse} from {@code conf/public/css/three-dots.css}).
-     * Hidden by default; toggled via {@link #setLoading(boolean)}.
-     */
-    private void buildLoadingDots() {
-        Color dotColor = Color.web("#9880ff"); // matches three-dots.css
-        Circle d1 = new Circle(5, dotColor);
-        Circle d2 = new Circle(5, dotColor);
-        Circle d3 = new Circle(5, dotColor);
-        loadingDots.getChildren().setAll(d1, d2, d3);
-        loadingDots.setAlignment(Pos.CENTER);
-        loadingDots.setVisible(false);
-        loadingDots.setManaged(false);
-
-        // Three offset opacity pulses, ~1.5s cycle (mirrors the CSS).
-        loadingTimeline.setCycleCount(Animation.INDEFINITE);
-        loadingTimeline.getKeyFrames().setAll(
-                new KeyFrame(Duration.ZERO,
-                        new KeyValue(d1.opacityProperty(), 0.2),
-                        new KeyValue(d2.opacityProperty(), 0.2),
-                        new KeyValue(d3.opacityProperty(), 0.2)),
-                new KeyFrame(Duration.millis(250),
-                        new KeyValue(d1.opacityProperty(), 1.0)),
-                new KeyFrame(Duration.millis(500),
-                        new KeyValue(d1.opacityProperty(), 0.2),
-                        new KeyValue(d2.opacityProperty(), 1.0)),
-                new KeyFrame(Duration.millis(750),
-                        new KeyValue(d2.opacityProperty(), 0.2),
-                        new KeyValue(d3.opacityProperty(), 1.0)),
-                new KeyFrame(Duration.millis(1500),
-                        new KeyValue(d3.opacityProperty(), 0.2))
-        );
-    }
-
-    /**
-     * Reference-counted loading state.  Multiple concurrent reasons can
-     * "hold" the loading indicator (startup backend warm-up + an
-     * in-flight render, etc.); the dots stay visible until every reason
-     * has released.  Avoids the previous race where a startup-warmup
-     * release would clobber a render's still-pending visual.
-     */
-    private final java.util.concurrent.atomic.AtomicInteger loadingRefCount =
-            new java.util.concurrent.atomic.AtomicInteger(0);
-
+    /** Paired-call wrapper for the loading indicator: prefer
+     *  {@link #holdLoading()} when the acquire/release happen in the
+     *  same try/finally; this method exists for the few internal
+     *  call-sites whose acquire/release sit on different control-flow
+     *  branches (e.g. the deferred-render path in {@link #render()}). */
     private void setLoading(boolean loading) {
-        int now = loading
-                ? loadingRefCount.incrementAndGet()
-                : Math.max(0, loadingRefCount.decrementAndGet());
-        boolean shouldShow = now > 0;
-        Platform.runLater(() -> {
-            if (loadingDots.isVisible() == shouldShow) {
-                return;
-            }
-            loadingDots.setVisible(shouldShow);
-            loadingDots.setManaged(shouldShow);
-            if (shouldShow) {
-                loadingTimeline.playFromStart();
-            } else {
-                loadingTimeline.stop();
-            }
-        });
+        if (loading) {
+            loadingDots.incrementHold();
+        } else {
+            loadingDots.decrementHold();
+        }
     }
 
     /**
      * Public hold for the loading indicator.  Returns an
      * {@link AutoCloseable} that releases the hold when closed —
-     * allowing callers like the Save\u2192PDF action to surface their
+     * allowing callers like the Save→PDF action to surface their
      * own progress through the preview pane's prominent loading dots
      * (the global thin {@code progressBar} bar is easy to miss).
      *
@@ -550,14 +493,7 @@ public class PdfPreviewPane extends ViewPanel {
      * after the first release.  Safe to call from any thread.
      */
     public AutoCloseable holdLoading() {
-        setLoading(true);
-        java.util.concurrent.atomic.AtomicBoolean released =
-                new java.util.concurrent.atomic.AtomicBoolean(false);
-        return () -> {
-            if (released.compareAndSet(false, true)) {
-                setLoading(false);
-            }
-        };
+        return loadingDots.hold();
     }
 
     /**
@@ -1253,8 +1189,13 @@ public class PdfPreviewPane extends ViewPanel {
      * asciidoctor-pdf populates this with section bookmarks, so we get
      * a free chapter-by-chapter index.  Returns an empty list if the
      * document has no outline.
+     *
+     * <p>Package-private and static so the recursion / null-handling
+     * contract can be pinned by {@code PdfOutlineExtractTest} against
+     * an in-memory PDDocument fixture without needing the full
+     * {@link PdfPreviewPane} Spring bean.
      */
-    private List<PdfOutlineEntry> extractOutline(PDDocument doc) {
+    static List<PdfOutlineEntry> extractOutline(PDDocument doc) {
         org.apache.pdfbox.pdmodel.interactive.documentnavigation.outline.PDDocumentOutline rootOutline =
                 doc.getDocumentCatalog().getDocumentOutline();
         if (rootOutline == null) return java.util.List.of();
@@ -1268,7 +1209,7 @@ public class PdfPreviewPane extends ViewPanel {
         return result;
     }
 
-    private PdfOutlineEntry outlineItemToEntry(
+    private static PdfOutlineEntry outlineItemToEntry(
             org.apache.pdfbox.pdmodel.interactive.documentnavigation.outline.PDOutlineItem item,
             PDDocument doc) {
         String title = item.getTitle();

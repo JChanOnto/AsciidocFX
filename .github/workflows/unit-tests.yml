@@ -25,7 +25,7 @@ jobs:
     # alias mid-rollout; an explicit version always picks up immediately.
     runs-on: ubuntu-24.04
     # Hard cap so a stuck job fails loudly instead of consuming minutes.
-    timeout-minutes: 20
+    timeout-minutes: 25
 
     steps:
       - name: Checkout
@@ -38,16 +38,46 @@ jobs:
           java-version: '25'
           cache: maven
 
-      # The fork's unit tests target the new project-config / executable /
-      # preview-source code, none of which has a JavaFX or display
-      # dependency.  Restrict surefire to those classes so we don't pull in
-      # TestFX (which needs a display) on a headless CI runner.
-      # Jacoco 0.8.7 (pinned in pom) cannot instrument JDK 25 class files,
-      # so disable it for this job — coverage isn't needed for these tests.
-      - name: Run fork unit tests
+      # JavaFX/TestFX integration tests (LoadingDotsAnimationTest,
+      # PdfPreviewPaneZoomIntegrationTest, ProgressBarLifecycleTest,
+      # PdfPreviewOutlineNavigationTest, EventServiceTest) need a real
+      # display.  Install xvfb + the X libraries JavaFX's prism native
+      # plugin links against, plus libgtk for the Glass toolkit.  This
+      # is the minimal set; without these you get
+      # "no glass in java.library.path" or
+      # "Failed to load libprism_es2.so" at test startup.
+      - name: Install JavaFX / xvfb runtime deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            xvfb \
+            libgl1 \
+            libglu1-mesa \
+            libgtk-3-0 \
+            libpangoft2-1.0-0 \
+            libxxf86vm1 \
+            libxtst6 \
+            libxslt1.1 \
+            fonts-dejavu
+
+      # Run the FULL test suite under xvfb so both the pure-Java tests
+      # (PreviewSourceResolverTest etc.) and the TestFX-based GUI tests
+      # (LoadingDotsAnimationTest, PdfPreviewPaneZoomIntegrationTest,
+      # ProgressBarLifecycleTest, PdfPreviewOutlineNavigationTest,
+      # EventServiceTest) are exercised on every CI run.  Without this
+      # the GUI regressions caught by those tests slip through the
+      # gate \u2014 e.g. the multi-thread loading-dots race
+      # LoadingDotsAnimationTest.concurrentHoldsFromManyThreadsBalanceCorrectly
+      # caught and fixed.
+      #
+      # Jacoco 0.8.7 (pinned in pom) cannot instrument JDK 25 class
+      # files (Unsupported class file major version 69), so disable
+      # coverage for this job; the test results above the JaCoCo
+      # phase remain authoritative.
+      - name: Run full test suite under xvfb
         run: >
+          xvfb-run -a --server-args='-screen 0 1600x1200x24'
           mvn -B -ntp -DskipTests=false
-          -Dtest='AsciidoctorConfigLoaderTest,ExecutableResolverTest,ProjectConfigDiscoveryTest,PreviewSourceResolverTest'
           -DfailIfNoTests=true
           -Djacoco.skip=true
           test
