@@ -77,9 +77,20 @@ public final class PreviewSourceResolver {
         }
 
         String relative = baseDir.relativize(activeAbs).toString().replace('\\', '/');
+        // Synthesized wrapper around just the active chapter. Suppress the
+        // title page (`:title-page!:` + `:notitle:`), TOC (`:toc!:`), and
+        // section numbering (`:sectnums!:`) so the preview is the chapter
+        // pages and nothing else — no chrome inherited from the master or
+        // the project's .asciidoctorconfig.  These are standard
+        // asciidoctor-pdf attributes; the trailing `!` is asciidoctor's
+        // "unset" syntax that overrides values turned on elsewhere.
         String synthesized = ""
                 + "= " + chapterTitleFor(activeAbs) + " (preview)\n"
                 + ":doctype: book\n"
+                + ":notitle:\n"
+                + ":title-page!:\n"
+                + ":toc!:\n"
+                + ":sectnums!:\n"
                 + "include::" + relative + "[]\n";
         return Resolved.chapter(synthesized, baseDir);
     }

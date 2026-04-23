@@ -34,10 +34,12 @@ final class BundledRubyResolver {
     static Path find() {
         Path installDir = guessInstallDir();
         if (installDir == null) {
+            logger.info("No bundled Ruby: install dir not found (running outside appassembler layout?)");
             return null;
         }
         Path rubyBin = installDir.resolve("ruby").resolve("bin");
         if (!Files.isDirectory(rubyBin)) {
+            logger.info("No bundled Ruby: {} does not exist", rubyBin);
             return null;
         }
         boolean windows = System.getProperty("os.name", "").toLowerCase().contains("win");
@@ -50,13 +52,26 @@ final class BundledRubyResolver {
                 return c.toAbsolutePath();
             }
         }
+        logger.info("No bundled Ruby: asciidoctor-pdf launcher missing in {}", rubyBin);
         return null;
     }
 
     /**
-     * Best-effort: locate the appassembler {@code <install-dir>} by walking
-     * up from this class's source location.  Looks for the {@code lib/} and
-     * {@code conf/} siblings the appassembler layout produces.
+     * Best-effort: locate the appassembler {@code <install-dir>}.
+     *
+     * <p>Two layouts are recognised:
+     * <ol>
+     *   <li><b>Installed</b>: walk up from the class's source location
+     *       looking for {@code <dir>/lib} + {@code <dir>/conf} siblings
+     *       (the appassembler layout) and return that {@code <dir>} —
+     *       {@code <dir>/ruby/} sits next to them.</li>
+     *   <li><b>Dev (mvn spring-boot:run)</b>: classes live in
+     *       {@code <repo>/target/classes/}, which has no {@code lib/conf}
+     *       siblings.  Walk up looking instead for a
+     *       {@code target/appassembler} sibling and return that — the
+     *       {@code ruby/} the {@code install4j-package} profile copied
+     *       lives at {@code <repo>/target/appassembler/ruby/}.</li>
+     * </ol>
      */
     private static Path guessInstallDir() {
         try {
@@ -64,8 +79,14 @@ final class BundledRubyResolver {
                     .getCodeSource().getLocation().toURI());
             Path dir = Files.isDirectory(codeSource) ? codeSource : codeSource.getParent();
             for (int i = 0; i < 6 && dir != null; i++, dir = dir.getParent()) {
+                // Installed layout
                 if (Files.isDirectory(dir.resolve("lib")) && Files.isDirectory(dir.resolve("conf"))) {
                     return dir;
+                }
+                // Dev / appassembler layout
+                Path appassembler = dir.resolve("target").resolve("appassembler");
+                if (Files.isDirectory(appassembler)) {
+                    return appassembler;
                 }
             }
         } catch (Exception e) {

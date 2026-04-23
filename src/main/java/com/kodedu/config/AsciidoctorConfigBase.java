@@ -400,8 +400,23 @@ public abstract class AsciidoctorConfigBase<T extends LoadedAttributes> extends 
         return attributesBuilder.build();
     }
 
+    /**
+     * Asciidoctor "intrinsic" attributes that are computed from the source
+     * file's location / modification time during a parse.  Carrying these
+     * across parses is a footgun: e.g. {@code docdir} from an
+     * attribute-extraction parse done with the active chapter's dir as
+     * baseDir will, when fed to the actual render, override the
+     * renderer's own baseDir and break {@code include::} resolution
+     * (manifests as "include file not found: <docdir>/<wrapper-relative-path>"
+     * stamped into the rendered PDF).
+     */
+    private static final Set<String> INTRINSIC_LOCATION_ATTRS = Set.of(
+            "docdir", "docfile", "docname", "docfilesuffix",
+            "docdate", "doctime", "docyear", "doctimestamp",
+            "localdate", "localtime", "localyear", "localdatetime");
+
     private List<String> getIgnoredAttributes(Map<String, Object> attributes) {
-        return attributes.entrySet().stream().flatMap(e -> {
+        List<String> ignored = attributes.entrySet().stream().flatMap(e -> {
             String attr = e.getKey();
             Object value = e.getValue();
             List<String> attrs = new ArrayList<>();
@@ -416,6 +431,8 @@ public abstract class AsciidoctorConfigBase<T extends LoadedAttributes> extends 
             }
             return attrs.stream();
         }).collect(Collectors.toList());
+        ignored.addAll(INTRINSIC_LOCATION_ATTRS);
+        return ignored;
     }
 
     List<String> node_extensions = List.of("mmdc","vg2png","vg2svg","nomnoml","bytefield");

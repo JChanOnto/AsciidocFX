@@ -76,6 +76,48 @@ class PreviewSourceResolverTest {
     }
 
     @Test
+    void chapterScopeSuppressesTitlePageTocAndSectnums(@TempDir Path tmp) throws IOException {
+        // Regression guard: chapter-mode previews must NOT inherit the
+        // master's title page, TOC, or section numbering. These are the
+        // standard asciidoctor-pdf opt-out attributes; the trailing `!`
+        // is asciidoctor's "unset" syntax (overrides values turned on
+        // elsewhere via .asciidoctorconfig or a parent doc).
+        Path chapter = writeChapter(tmp, "01-overview.adoc", "== Overview\n");
+        Path master = writeMaster(tmp,
+                "= Book\n:doctype: book\n:toc: left\n:sectnums:\n\n"
+                        + "include::sections/01-overview.adoc[]\n");
+
+        PreviewSourceResolver.Resolved r = PreviewSourceResolver.resolve(
+                PreviewScope.CHAPTER, master, chapter, "== Overview\n");
+
+        assertEquals(PreviewScope.CHAPTER, r.scopeUsed());
+        assertTrue(r.source().contains(":notitle:"),
+                () -> "wrapper missing :notitle:\n" + r.source());
+        assertTrue(r.source().contains(":title-page!:"),
+                () -> "wrapper missing :title-page!:\n" + r.source());
+        assertTrue(r.source().contains(":toc!:"),
+                () -> "wrapper missing :toc!:\n" + r.source());
+        assertTrue(r.source().contains(":sectnums!:"),
+                () -> "wrapper missing :sectnums!:\n" + r.source());
+    }
+
+    @Test
+    void fullScopeDoesNotSuppressTitlePageOrToc(@TempDir Path tmp) throws IOException {
+        // Mirror of the above: master-scope renders MUST keep the
+        // master's title page, TOC, and section numbering as authored.
+        // The suppression attributes only ever live in the synthesized
+        // chapter wrapper.
+        Path master = writeMaster(tmp, "= Book\n:doctype: book\n:toc: left\n");
+        PreviewSourceResolver.Resolved r = PreviewSourceResolver.resolve(
+                PreviewScope.FULL, master, null, null);
+
+        assertFalse(r.source().contains(":notitle:"));
+        assertFalse(r.source().contains(":title-page!:"));
+        assertFalse(r.source().contains(":toc!:"));
+        assertFalse(r.source().contains(":sectnums!:"));
+    }
+
+    @Test
     void chapterScopeFallsBackWithNoticeWhenChapterNotIncluded(@TempDir Path tmp) throws IOException {
         Path stray = writeChapter(tmp, "stray.adoc", "stray\n");
         Path master = writeMaster(tmp, "= Book\n");

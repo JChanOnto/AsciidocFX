@@ -79,11 +79,13 @@ public class PdfRenderer {
         long t0 = System.currentTimeMillis();
         List<String> externalCmd = resolveExternalCommand();
         if (externalCmd != null) {
+            logger.info("PDF render via external CLI: {}", externalCmd.get(0));
             renderViaExternal(externalCmd, asciidoc, baseDir, outPdf);
             logger.info("PDF render (external {}) {} bytes in {} ms -> {}",
                     externalCmd.get(0), safeSize(outPdf),
                     System.currentTimeMillis() - t0, outPdf);
         } else {
+            logger.info("PDF render via in-process JRuby asciidoctor-pdf (no external CLI configured)");
             renderViaJRuby(asciidoc, baseDir, outPdf);
             logger.info("PDF render (jruby) {} bytes in {} ms -> {}",
                     safeSize(outPdf), System.currentTimeMillis() - t0, outPdf);
@@ -113,10 +115,52 @@ public class PdfRenderer {
         try { return Files.size(p); } catch (IOException e) { return -1L; }
     }
 
+    /**
+     * Asciidoctor "intrinsic" attributes that are computed by the parser
+     * from the source file's location / modification time.  Passing any
+     * of these from one parse into another (e.g. via
+     * {@code Options.attributes(...)} or a CLI {@code -a} flag) overrides
+     * the renderer's own {@code baseDir} and breaks {@code include::}
+     * resolution — manifests as
+     *   "include file not found: <leaked-docdir>/<wrapper-relative-path>"
+     * stamped into the rendered PDF on the title page.
+     *
+     * <p>{@link com.kodedu.config.AsciidoctorConfigBase#getIgnoredAttributes}
+     * already filters these from the canonical attribute map, but we
+     * strip them again here as a second line of defence so this class's
+     * contract ("renderer owns baseDir") is enforced regardless of what
+     * the caller hands us.
+     */
+    static final java.util.Set<String> INTRINSIC_LOCATION_ATTRS = java.util.Set.of(
+            "docdir", "docfile", "docname", "docfilesuffix",
+            "docdate", "doctime", "docyear", "doctimestamp",
+            "localdate", "localtime", "localyear", "localdatetime");
+
+    /** Drop intrinsic location/time attributes; everything else passes through. */
+    static java.util.Map<String, Object> stripIntrinsicLocationAttrs(
+            java.util.Map<String, Object> map) {
+        if (map == null || map.isEmpty()) {
+            return map;
+        }
+        java.util.Map<String, Object> out = new java.util.LinkedHashMap<>(map);
+        boolean changed = out.keySet().removeAll(INTRINSIC_LOCATION_ATTRS);
+        if (changed) {
+            logger.debug("Stripped intrinsic location attrs from render-time attribute map");
+        }
+        return out;
+    }
+
     private void renderViaJRuby(String asciidoc, Path baseDir, Path outPdf) {
         File destFile = outPdf.toFile();
         SafeMode safe = convertSafe(pdfConfigBean.getSafe());
         Attributes attributes = pdfConfigBean.getAsciiDocAttributes(asciidoc);
+        // Defence in depth: re-strip any leaked docdir/docfile/etc. before
+        // they can override the explicit baseDir below.
+        Attributes safeAttributes = Attributes.builder().build();
+        for (java.util.Map.Entry<String, Object> e :
+                stripIntrinsicLocationAttrs(attributes.map()).entrySet()) {
+            safeAttributes.setAttribute(e.getKey(), e.getValue());
+        }
         Options options = Options.builder()
                 .baseDir(baseDir.toFile())
                 .toFile(destFile)
@@ -124,7 +168,7 @@ public class PdfRenderer {
                 .safe(safe)
                 .sourcemap(pdfConfigBean.getSourcemap())
                 .headerFooter(pdfConfigBean.getHeader_footer())
-                .attributes(attributes)
+                .attributes(safeAttributes)
                 .build();
         String content = ExtensionPreprocessor.correctExtensionBlocks(asciidoc);
         org.asciidoctor.Asciidoctor doctor = getNonHtmlDoctor();
@@ -175,7 +219,11 @@ public class PdfRenderer {
             }
 
             Attributes attrs = pdfConfigBean.getAsciiDocAttributes(asciidoc);
-            for (Map.Entry<String, Object> e : attrs.map().entrySet()) {
+            // Defence in depth: matches the renderViaJRuby strip — the
+            // external CLI honours -a docdir=... by overriding the resolved
+            // base dir, which would re-introduce the include-resolution bug.
+            Map<String, Object> attrMap = stripIntrinsicLocationAttrs(attrs.map());
+            for (Map.Entry<String, Object> e : attrMap.entrySet()) {
                 Object v = e.getValue();
                 if (v == null || Boolean.FALSE.equals(v)) {
                     argv.add("-a"); argv.add(e.getKey() + "!");
