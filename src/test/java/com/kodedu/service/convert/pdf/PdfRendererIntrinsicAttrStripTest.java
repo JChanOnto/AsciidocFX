@@ -32,15 +32,15 @@ class PdfRendererIntrinsicAttrStripTest {
     @Test
     void docdirIsStrippedSoItCannotOverrideRendererBaseDir() {
         Map<String, Object> in = new LinkedHashMap<>();
-        in.put("docdir", "D:/JaredC/repos/DEMO-2026-Q1-TrueADC-Docs/sections");
-        in.put("pdf-theme", "truedac");
+        in.put("docdir", "/tmp/project/sections");
+        in.put("pdf-theme", "custom");
 
         Map<String, Object> out = PdfRenderer.stripIntrinsicLocationAttrs(in);
 
         assertFalse(out.containsKey("docdir"),
                 "docdir must never reach the renderer; it overrides baseDir "
                         + "and breaks include:: resolution");
-        assertEquals("truedac", out.get("pdf-theme"),
+        assertEquals("custom", out.get("pdf-theme"),
                 "non-intrinsic attributes must pass through untouched");
     }
 
@@ -98,7 +98,7 @@ class PdfRendererIntrinsicAttrStripTest {
     @Test
     void mapWithoutAnyIntrinsicAttrsIsReturnedUnchanged() {
         Map<String, Object> in = new LinkedHashMap<>();
-        in.put("pdf-theme", "truedac");
+        in.put("pdf-theme", "custom");
         in.put("source-highlighter", "rouge");
 
         Map<String, Object> out = PdfRenderer.stripIntrinsicLocationAttrs(in);

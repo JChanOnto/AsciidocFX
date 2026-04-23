@@ -69,7 +69,7 @@ class AsciidoctorAttributeExtractIncludeTest {
     private static final String WRAPPER_WITH_INCLUDES = """
             = Demo
             :doctype: book
-            :pdf-theme: truedac
+            :pdf-theme: custom
 
             include::sections/_attributes.adoc[]
             include::sections/01-overview.adoc[]
@@ -133,7 +133,7 @@ class AsciidoctorAttributeExtractIncludeTest {
         // The header attribute table is the whole reason this parse
         // exists; if parseHeaderOnly hid it we'd have traded one bug
         // for another.
-        assertTrue("truedac".equals(document.getAttributes().get("pdf-theme")),
+        assertTrue("custom".equals(document.getAttributes().get("pdf-theme")),
                 "header attribute pdf-theme must be exposed by parseHeaderOnly; got "
                         + document.getAttributes());
         assertTrue("book".equals(document.getAttributes().get("doctype")),

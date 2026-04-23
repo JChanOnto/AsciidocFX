@@ -76,14 +76,14 @@ class ChapterWrapperIncludeResolutionTest {
     private Path makeProject(Path root) throws Exception {
         Path sections = Files.createDirectory(root.resolve("sections"));
         Files.writeString(sections.resolve("_attributes.adoc"),
-                ":product-name: TrueADC\n:diagram: mermaid,format=svg\n");
+                ":product-name: Widget\n:diagram: mermaid,format=svg\n");
         Files.writeString(sections.resolve("01-overview.adoc"),
                 "== Overview\n\nProse content.\n");
         Files.writeString(sections.resolve("02-core.adoc"),
                 "== Core\n\nMore prose.\n");
         Path master = root.resolve("master.adoc");
         Files.writeString(master,
-                "= Demo Book\n:doctype: book\n:pdf-theme: truedac\n\n"
+                "= Demo Book\n:doctype: book\n:pdf-theme: custom\n\n"
                         + "include::sections/_attributes.adoc[]\n\n"
                         + "include::sections/01-overview.adoc[]\n"
                         + "include::sections/02-core.adoc[]\n");
@@ -96,7 +96,7 @@ class ChapterWrapperIncludeResolutionTest {
      *  partial stays so the chapter's attribute environment matches
      *  the full render. */
     private String buildWrapper() {
-        return "= Demo Book\n:doctype: book\n:pdf-theme: truedac\n"
+        return "= Demo Book\n:doctype: book\n:pdf-theme: custom\n"
                 + ":notitle:\n:title-page!:\n:toc!:\n:sectnums!:\n\n"
                 + "include::sections/_attributes.adoc[]\n\n"
                 + "include::sections/01-overview.adoc[]\n";
@@ -163,7 +163,7 @@ class ChapterWrapperIncludeResolutionTest {
         // still present — fixing the include bug must not trade for
         // losing the attribute extraction that was the reason for the
         // parse in the first place.
-        assertEquals("truedac", document.getAttributes().get("pdf-theme"),
+        assertEquals("custom", document.getAttributes().get("pdf-theme"),
                 "header attribute pdf-theme must survive the parse; got "
                         + document.getAttributes());
         assertEquals("book", document.getAttributes().get("doctype"),

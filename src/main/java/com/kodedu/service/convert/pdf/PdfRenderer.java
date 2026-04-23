@@ -131,7 +131,7 @@ public class PdfRenderer {
      * contract ("renderer owns baseDir") is enforced regardless of what
      * the caller hands us.
      */
-    static final java.util.Set<String> INTRINSIC_LOCATION_ATTRS = java.util.Set.of(
+    public static final java.util.Set<String> INTRINSIC_LOCATION_ATTRS = java.util.Set.of(
             "docdir", "docfile", "docname", "docfilesuffix",
             "docdate", "doctime", "docyear", "doctimestamp",
             "localdate", "localtime", "localyear", "localdatetime");

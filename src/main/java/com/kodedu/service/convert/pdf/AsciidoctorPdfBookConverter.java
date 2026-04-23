@@ -58,15 +58,26 @@ public class AsciidoctorPdfBookConverter implements DocumentConverter<RenderResu
     @Override
     public void convert(boolean askPath, Consumer<RenderResult>... nextStep) {
 
-        String asciidoc = current.currentEditorValue();
-
         threadService.runTaskLater(() -> {
 
             final Path pdfPath = directoryService.getSaveOutputPath(ExtensionFilters.PDF, askPath);
 
             File destFile = pdfPath.toFile();
 
-            Path workdir = current.currentTab().getParentOrWorkdir();
+            // Reuse the preview pane's master + scope resolution so
+            // Save->PDF matches "what you see is what you save".  Without
+            // this, Save on a chapter file fed the renderer the raw
+            // `== Chapter` fragment with the chapter's own folder as
+            // baseDir - so the saved PDF came out with no diagrams
+            // (`[{diagram}]` undefined), no screenshots (no :imagesdir:),
+            // and no theme, even though the preview rendered fine.
+            java.util.Optional<com.kodedu.service.preview.PreviewSourceResolver.Resolved> resolved =
+                    pdfPreviewPane.resolveCurrentRenderSource();
+
+            final String asciidoc = resolved.map(r -> r.source())
+                    .orElseGet(current::currentEditorValue);
+            final Path workdir = resolved.map(r -> r.baseDir())
+                    .orElseGet(() -> current.currentTab().getParentOrWorkdir());
 
             indikatorService.startProgressBar();
             // Also light up the PDF preview pane's loading dots: the
@@ -76,7 +87,12 @@ public class AsciidoctorPdfBookConverter implements DocumentConverter<RenderResu
             // this hold the user gets no obvious feedback that
             // anything is happening.
             AutoCloseable previewLoading = pdfPreviewPane.holdLoading();
-            logger.debug("PDF conversion started");
+            if (resolved.isPresent()) {
+                logger.debug("PDF conversion started (scope={}, baseDir={})",
+                        resolved.get().scopeUsed(), workdir);
+            } else {
+                logger.debug("PDF conversion started (raw editor buffer; no master resolved)");
+            }
 
             try {
                 pdfRenderer.renderTo(asciidoc, workdir, pdfPath);

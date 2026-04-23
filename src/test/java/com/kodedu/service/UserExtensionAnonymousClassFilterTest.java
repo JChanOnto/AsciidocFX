@@ -61,8 +61,8 @@ class UserExtensionAnonymousClassFilterTest {
         Ruby ruby = Ruby.newInstance();
         // Real-world shape: a named subclass like a user might write
         // outside the block-form DSL.
-        ruby.evalScriptlet("module TrueadcDocs; class MyTreeProc; end; end");
-        RubyClass named = (RubyClass) ruby.evalScriptlet("TrueadcDocs::MyTreeProc");
+        ruby.evalScriptlet("module SampleDocs; class MyTreeProc; end; end");
+        RubyClass named = (RubyClass) ruby.evalScriptlet("SampleDocs::MyTreeProc");
 
         assertTrue(invokeIsNamed(named),
                 "Named classes must pass through so they're registered "

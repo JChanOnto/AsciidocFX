@@ -836,6 +836,59 @@ public class PdfPreviewPane extends ViewPanel {
     }
 
     /**
+     * Compute the same source + baseDir the preview would render right
+     * now, so Save&rarr;PDF and other offline exports can share the
+     * preview's wrapper/master logic instead of feeding the raw
+     * active-tab buffer to the renderer.
+     *
+     * <p>Without this, Save&rarr;PDF of a chapter would hand the
+     * renderer a bare {@code == Chapter} fragment with the chapter's
+     * own directory as baseDir &mdash; bypassing the master's
+     * {@code :pdf-theme:}, {@code :imagesdir:},
+     * {@code include::sections/_attributes.adoc[]} (so {@code
+     * [{diagram}]} blocks fail), etc.  The saved PDF then renders
+     * without diagrams, screenshots, or theme, while the preview
+     * &mdash; which goes through {@link PreviewSourceResolver}
+     * correctly &mdash; shows them just fine.  "What you see is what
+     * you save."
+     *
+     * <p>Returns {@link Optional#empty()} if there is no active tab,
+     * no editor buffer, or no resolvable master.  Callers must fall
+     * back to their legacy raw-buffer path in those cases.
+     *
+     * <p>This may pop the master-disambiguation dialog if the chapter
+     * is included by more than one book AND no choice is cached.  That
+     * matches preview behaviour; the cache is shared.
+     */
+    public java.util.Optional<PreviewSourceResolver.Resolved> resolveCurrentRenderSource() {
+        if (current.currentTab() == null) {
+            return java.util.Optional.empty();
+        }
+        Path activeFile = current.currentTab().getPath();
+        if (activeFile == null) {
+            return java.util.Optional.empty();
+        }
+        String asciidoc = current.currentEditorValue();
+        if (asciidoc == null) {
+            return java.util.Optional.empty();
+        }
+        Path masterAdoc = resolveMasterAdoc();
+        if (masterAdoc == null) {
+            return java.util.Optional.empty();
+        }
+        PreviewScope scope = previewConfigBean.getPdfPreviewScope();
+        try {
+            PreviewSourceResolver.Resolved r =
+                    PreviewSourceResolver.resolve(scope, masterAdoc, activeFile, asciidoc);
+            return java.util.Optional.of(r);
+        } catch (java.io.IOException e) {
+            logger.warn("Could not resolve render source for active tab {}",
+                    activeFile, e);
+            return java.util.Optional.empty();
+        }
+    }
+
+    /**
      * Resolve the master document for {@code activeFile} off the FX thread
      * and publish it to {@link #currentMasterProperty()} — without
      * triggering a PDF render.  Called when the user switches tabs so the

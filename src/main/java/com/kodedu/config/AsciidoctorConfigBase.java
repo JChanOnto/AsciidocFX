@@ -14,6 +14,7 @@ import com.kodedu.other.JsonHelper;
 import com.kodedu.service.AsciidoctorConfigLoader;
 import com.kodedu.service.ExecutableResolver;
 import com.kodedu.service.ThreadService;
+import com.kodedu.service.convert.pdf.PdfRenderer;
 import jakarta.json.*;
 import javafx.beans.property.*;
 import javafx.collections.FXCollections;
@@ -41,7 +42,6 @@ import java.nio.file.Paths;
 import java.util.*;
 import java.util.stream.Collectors;
 
-import static com.kodedu.other.Constants.DOC_FILE_ATTR;
 import static com.kodedu.service.AsciidoctorFactory.getPlainDoctor;
 
 /**
@@ -434,20 +434,13 @@ public abstract class AsciidoctorConfigBase<T extends LoadedAttributes> extends 
     }
 
     /**
-     * Asciidoctor "intrinsic" attributes that are computed from the source
-     * file's location / modification time during a parse.  Carrying these
-     * across parses is a footgun: e.g. {@code docdir} from an
-     * attribute-extraction parse done with the active chapter's dir as
-     * baseDir will, when fed to the actual render, override the
-     * renderer's own baseDir and break {@code include::} resolution
-     * (manifests as "include file not found: <docdir>/<wrapper-relative-path>"
-     * stamped into the rendered PDF).
+     * Canonical set of Asciidoctor intrinsic location/time attributes;
+     * see {@link PdfRenderer#INTRINSIC_LOCATION_ATTRS} for the full
+     * rationale.  We reference the canonical definition instead of
+     * maintaining a parallel copy: these attributes are computed by the
+     * parser from the source file's location and must never be carried
+     * from an attribute-extraction parse into a subsequent render.
      */
-    private static final Set<String> INTRINSIC_LOCATION_ATTRS = Set.of(
-            "docdir", "docfile", "docname", "docfilesuffix",
-            "docdate", "doctime", "docyear", "doctimestamp",
-            "localdate", "localtime", "localyear", "localdatetime");
-
     private List<String> getIgnoredAttributes(Map<String, Object> attributes) {
         List<String> ignored = attributes.entrySet().stream().flatMap(e -> {
             String attr = e.getKey();
@@ -464,7 +457,7 @@ public abstract class AsciidoctorConfigBase<T extends LoadedAttributes> extends 
             }
             return attrs.stream();
         }).collect(Collectors.toList());
-        ignored.addAll(INTRINSIC_LOCATION_ATTRS);
+        ignored.addAll(PdfRenderer.INTRINSIC_LOCATION_ATTRS);
         return ignored;
     }
 
