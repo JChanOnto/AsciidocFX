@@ -661,12 +661,49 @@
                                         <available file="${project.basedir}/ruby-runtime/${afx.ruby.os}"
                                                    type="dir"
                                                    property="afx.ruby.bundled"/>
+                                        <available file="${project.basedir}/ruby-runtime/${afx.ruby.os}/bin/asciidoctor-pdf.bat"
+                                                   property="afx.ruby.launcher.windows"/>
+                                        <available file="${project.basedir}/ruby-runtime/${afx.ruby.os}/bin/asciidoctor-pdf"
+                                                   property="afx.ruby.launcher.unix"/>
                                         <copy todir="${project.build.directory}/appassembler/ruby"
                                               failonerror="false">
                                             <fileset dir="${project.basedir}/ruby-runtime/${afx.ruby.os}"
                                                      erroronmissingdir="false"/>
                                         </copy>
-                                        <echo>Bundled Ruby runtime present: ${afx.ruby.bundled}</echo>
+                                        <!--
+                                            Loud diagnostics so a missing bundled Ruby is obvious in
+                                            build logs (CI + local). The fast-path PDF render in the
+                                            installed app silently falls back to JRuby when this tree
+                                            isn't shipped, so screaming about it here is the only place
+                                            the regression is catchable before users see it.
+                                        -->
+                                        <echo>================================================================</echo>
+                                        <echo>  Bundled Ruby runtime check</echo>
+                                        <echo>    OS family       : ${afx.ruby.os}</echo>
+                                        <echo>    Source dir      : ${project.basedir}/ruby-runtime/${afx.ruby.os}</echo>
+                                        <echo>    Source present  : ${afx.ruby.bundled}</echo>
+                                        <echo>    Launcher (win)  : ${afx.ruby.launcher.windows}</echo>
+                                        <echo>    Launcher (unix) : ${afx.ruby.launcher.unix}</echo>
+                                        <echo>    Staged into     : ${project.build.directory}/appassembler/ruby</echo>
+                                        <echo>================================================================</echo>
+                                        <fail message="Bundled Ruby was requested (-Dafx.ruby.required=true) but ruby-runtime/${afx.ruby.os}/ is missing or empty. Run scripts/setup.ps1 -WithRuby (or scripts/setup.sh --with-ruby) before packaging.">
+                                            <condition>
+                                                <and>
+                                                    <istrue value="${afx.ruby.required}"/>
+                                                    <or>
+                                                        <not><isset property="afx.ruby.bundled"/></not>
+                                                        <and>
+                                                            <equals arg1="${afx.ruby.os}" arg2="windows"/>
+                                                            <not><isset property="afx.ruby.launcher.windows"/></not>
+                                                        </and>
+                                                        <and>
+                                                            <not><equals arg1="${afx.ruby.os}" arg2="windows"/></not>
+                                                            <not><isset property="afx.ruby.launcher.unix"/></not>
+                                                        </and>
+                                                    </or>
+                                                </and>
+                                            </condition>
+                                        </fail>
 
                                         <zip destfile="${project.build.directory}/asciidocfx-${project.version}.zip"
                                              basedir="${project.build.directory}/appassembler/">

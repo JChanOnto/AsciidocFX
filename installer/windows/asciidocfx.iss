@@ -67,6 +67,11 @@ UninstallDisplayIcon={app}\app\bin\asciidocfx.ico
 LicenseFile={#StagingDir}\LICENSE.txt
 SetupIconFile={#StagingDir}\app\bin\asciidocfx.ico
 ChangesAssociations=yes
+; Force Inno Setup to write a per-run install log to %TEMP%\Setup Log YYYY-MM-DD #NNN.txt
+; (every file copied, every registry write, every error). When users report
+; "bundled Ruby didn't work on a fresh install", ask them for this log --
+; it's the ground truth for whether the payload reached disk.
+SetupLogging=yes
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
@@ -87,6 +92,11 @@ Source: "{#StagingDir}\launcher.bat"; DestDir: "{app}"; Flags: ignoreversion
 ; License file
 Source: "{#StagingDir}\LICENSE.txt"; DestDir: "{app}"; Flags: ignoreversion
 
+[UninstallDelete]
+; Diagnostic log written by the post-install [Code] section. Not part of
+; the [Files] manifest, so register it here so uninstall removes it.
+Type: files; Name: "{app}\install-log.txt"
+
 [Icons]
 Name: "{group}\{#MyAppName}";          Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; IconFilename: "{app}\app\bin\asciidocfx.ico"
 Name: "{group}\Uninstall {#MyAppName}"; Filename: "{uninstallexe}"
@@ -104,3 +114,88 @@ Root: HKA; Subkey: "Software\Classes\AsciidocFX.Document\shell\open\command"; Va
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#MyAppName}}"; Flags: nowait postinstall skipifsilent shellexec
+
+[Code]
+{ ----------------------------------------------------------------------------
+  Post-install diagnostics for the bundled CRuby payload.
+
+  The fast PDF render path in AsciidocFX requires:
+      <install>\app\ruby\bin\ruby.exe
+      <install>\app\ruby\bin\asciidoctor-pdf.bat
+
+  When these are missing, the app silently falls back to in-process JRuby
+  (slow). To make that failure mode catchable on end-user machines:
+
+    1. Verify both files exist immediately after install completes.
+    2. Copy Inno Setup's own per-install log into <install>\install-log.txt
+       so the user can attach it to a bug report without hunting in %TEMP%.
+    3. Append a bundled-Ruby section to install-log.txt with the file
+       sizes / existence flags.
+    4. If anything is missing (and we're not running silently) show a
+       message box pointing at install-log.txt.
+  ---------------------------------------------------------------------------- }
+
+procedure VerifyBundledRubyAndWriteLog;
+var
+  RubyExe, AdocPdfBat, LogDest, RubyDir, Note: string;
+  RubyExeOk, AdocPdfOk: Boolean;
+  LogLines: TArrayOfString;
+begin
+  RubyDir    := ExpandConstant('{app}\app\ruby\bin');
+  RubyExe    := RubyDir + '\ruby.exe';
+  AdocPdfBat := RubyDir + '\asciidoctor-pdf.bat';
+  LogDest    := ExpandConstant('{app}\install-log.txt');
+
+  RubyExeOk := FileExists(RubyExe);
+  AdocPdfOk := FileExists(AdocPdfBat);
+
+  { Mirror Inno's auto-generated setup log next to the install for easy access. }
+  if GetSetupLogFileName <> '' then begin
+    if not FileCopy(GetSetupLogFileName, LogDest, False) then
+      Log('Could not copy setup log to ' + LogDest);
+  end;
+
+  { Append a bundled-Ruby section so it's the first thing visible in the file. }
+  SetArrayLength(LogLines, 8);
+  LogLines[0] := '';
+  LogLines[1] := '================================================================';
+  LogLines[2] := '  Bundled CRuby payload check (post-install)';
+  LogLines[3] := '================================================================';
+  LogLines[4] := '  Install dir      : ' + ExpandConstant('{app}');
+  LogLines[5] := '  ruby.exe         : ' + RubyExe + '   ' + Format('exists=%s', [BoolToStr(RubyExeOk, True)]);
+  LogLines[6] := '  asciidoctor-pdf  : ' + AdocPdfBat + '   ' + Format('exists=%s', [BoolToStr(AdocPdfOk, True)]);
+  LogLines[7] := '================================================================';
+  if not SaveStringsToFile(LogDest, LogLines, True) then
+    Log('Could not append bundled-Ruby summary to ' + LogDest);
+
+  { Loud warning if anything is missing. Skipped in silent installs (/SILENT)
+    so unattended deploys don't block on a messagebox. }
+  if (not RubyExeOk) or (not AdocPdfOk) then begin
+    Log('WARNING: Bundled CRuby payload incomplete.');
+    Log('  ruby.exe         exists=' + BoolToStr(RubyExeOk, True));
+    Log('  asciidoctor-pdf  exists=' + BoolToStr(AdocPdfOk, True));
+    if not WizardSilent then begin
+      Note :=
+        'AsciidocFX installed successfully, but the bundled Ruby runtime is incomplete:' + #13#10 +
+        #13#10 +
+        '  ruby.exe        : ' + BoolToStr(RubyExeOk, True) + #13#10 +
+        '  asciidoctor-pdf : ' + BoolToStr(AdocPdfOk, True) + #13#10 +
+        #13#10 +
+        'PDF export will fall back to the slower in-process JRuby renderer.' + #13#10 +
+        #13#10 +
+        'A diagnostic log has been written to:' + #13#10 +
+        '  ' + LogDest + #13#10 +
+        #13#10 +
+        'Please attach that file to a bug report so the build can be fixed.';
+      MsgBox(Note, mbInformation, MB_OK);
+    end;
+  end else begin
+    Log('Bundled CRuby payload OK (ruby.exe + asciidoctor-pdf.bat present).');
+  end;
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep = ssPostInstall then
+    VerifyBundledRubyAndWriteLog;
+end;

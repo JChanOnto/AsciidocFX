@@ -20,7 +20,12 @@ param(
     [string]$IsccPath = 'iscc.exe',
     [string]$AppAssembler,
     [string]$OutputDir,
-    [string]$IconFile
+    [string]$IconFile,
+    # When set, abort if the appassembler tree does NOT contain a bundled
+    # CRuby (target\appassembler\ruby\bin\asciidoctor-pdf.bat). Use in CI
+    # when the release pipeline ran with -WithRuby and silently dropping
+    # the fast PDF path would be a release-blocking regression.
+    [switch]$RequireBundledRuby
 )
 
 $ErrorActionPreference = 'Stop'
@@ -74,6 +79,69 @@ New-Item -ItemType Directory -Force -Path $staging | Out-Null
 
 Write-Host "[installer] Staging app/ ..."
 Copy-Item -Recurse -Force "$AppAssembler\*" (New-Item -ItemType Directory -Force -Path (Join-Path $staging 'app')).FullName
+
+# --- Bundled CRuby diagnostics --------------------------------------------
+# The Maven install4j-package profile copies ruby-runtime/<os>/ into
+# target\appassembler\ruby\ when present. If it's missing here, the
+# installed app silently falls back to in-process JRuby for PDF render
+# (slow). Make that visible at staging time so a CI / release builder
+# catches it before users do.
+$stagedRubyBin       = Join-Path $staging 'app\ruby\bin'
+$stagedRubyExe       = Join-Path $stagedRubyBin 'ruby.exe'
+$stagedAsciidoctorPdf = Join-Path $stagedRubyBin 'asciidoctor-pdf.bat'
+
+Write-Host ""
+Write-Host "================================================================"
+Write-Host "  Bundled CRuby payload check (target: <install>\app\ruby\)"
+Write-Host "================================================================"
+$rubyOk = $true
+if (-not (Test-Path $stagedRubyBin)) {
+    Write-Warning "  app\ruby\bin\        MISSING  (BundledRubyResolver will return null)"
+    $rubyOk = $false
+} else {
+    $rubyFiles = Get-ChildItem $stagedRubyBin -File -ErrorAction SilentlyContinue
+    $rubySize  = (Get-ChildItem (Join-Path $staging 'app\ruby') -Recurse -File -ErrorAction SilentlyContinue |
+                  Measure-Object Length -Sum).Sum
+    Write-Host ("  app\ruby\bin\        present  ({0} files)" -f $rubyFiles.Count)
+    Write-Host ("  app\ruby\ total      {0:N1} MB" -f ($rubySize / 1MB))
+}
+foreach ($req in @($stagedRubyExe, $stagedAsciidoctorPdf)) {
+    $rel = $req.Substring($staging.Length).TrimStart('\')
+    if (Test-Path $req) {
+        Write-Host "  $rel  OK"
+    } else {
+        Write-Warning "  $rel  MISSING"
+        $rubyOk = $false
+    }
+}
+if ($rubyOk) {
+    Write-Host "[installer] Bundled CRuby OK -- installed app will use fast native PDF render path."
+} else {
+    $msg = @(
+        ""
+        "*** BUNDLED CRuby NOT IN STAGING ***"
+        "    The installer will produce a working AsciidocFX, but PDF render"
+        "    will silently fall back to the in-process JRuby path (slow)."
+        ""
+        "    To fix:"
+        "      1. Run scripts\setup.ps1 -WithRuby   (populates ruby-runtime\windows\)"
+        "      2. Run scripts\build.ps1   -WithRuby (re-runs the package step which"
+        "         copies ruby-runtime\windows\ -> target\appassembler\ruby\)"
+        "      3. Re-run this script."
+        ""
+        "    Source dir checked    : $(Join-Path $repoRoot 'ruby-runtime\windows')"
+        "    AppAssembler dir      : $AppAssembler"
+        "    Staging target        : $stagedRubyBin"
+        ""
+    ) -join [Environment]::NewLine
+    if ($RequireBundledRuby) {
+        throw "Bundled CRuby missing from staging payload. $msg"
+    } else {
+        Write-Warning $msg
+    }
+}
+Write-Host "================================================================"
+Write-Host ""
 
 Write-Host "[installer] Staging runtime/ (JRE) ..."
 $runtimeDst = New-Item -ItemType Directory -Force -Path (Join-Path $staging 'runtime')
@@ -141,6 +209,27 @@ $isccArgs = @(
 Write-Host "[installer] iscc $($isccArgs -join ' ')"
 & $iscc @isccArgs
 if ($LASTEXITCODE -ne 0) { throw "iscc failed with exit code $LASTEXITCODE" }
+
+# Side-car manifest of what we packaged. Useful as a CI artifact: when a
+# user reports "bundled Ruby didn't install on my machine", you can diff
+# their actual install layout against this to see whether the payload
+# even contained the files.
+$manifest = Join-Path $OutputDir "AsciidocFX-$Version-payload-manifest.txt"
+"AsciidocFX $Version installer payload manifest" | Out-File -Encoding utf8 $manifest
+"Built       : $(Get-Date -Format o)"            | Out-File -Encoding utf8 -Append $manifest
+"Staging dir : $staging"                          | Out-File -Encoding utf8 -Append $manifest
+"BundledRuby : $rubyOk"                           | Out-File -Encoding utf8 -Append $manifest
+""                                                | Out-File -Encoding utf8 -Append $manifest
+"--- staging\app\ruby\ tree (or '<missing>') ---" | Out-File -Encoding utf8 -Append $manifest
+$rubyRoot = Join-Path $staging 'app\ruby'
+if (Test-Path $rubyRoot) {
+    Get-ChildItem $rubyRoot -Recurse -File |
+        ForEach-Object { '{0,12}  {1}' -f $_.Length, $_.FullName.Substring($staging.Length).TrimStart('\') } |
+        Out-File -Encoding utf8 -Append $manifest
+} else {
+    "<missing>" | Out-File -Encoding utf8 -Append $manifest
+}
+Write-Host "[installer] Payload manifest: $manifest"
 
 $out = Get-ChildItem (Join-Path $OutputDir "AsciidocFX-$Version-Setup.exe") -ErrorAction Stop
 Write-Host ""

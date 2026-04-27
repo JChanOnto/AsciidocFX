@@ -65,24 +65,45 @@ jobs:
         shell: pwsh
         run: ./scripts/build.ps1 -SkipSetup -WithRuby
 
+      # Hard gate: if Maven didn't copy ruby-runtime\windows\ into the
+      # appassembler tree, fail the release before we waste time signing
+      # an installer that's missing the fast PDF render path.
+      - name: Verify bundled CRuby reached appassembler
+        shell: pwsh
+        run: |
+          $ruby = "target/appassembler/ruby/bin/asciidoctor-pdf.bat"
+          if (-not (Test-Path $ruby)) {
+            Write-Host "::error::Bundled CRuby missing from appassembler tree ($ruby). Did setup.ps1 -WithRuby populate ruby-runtime/windows/?"
+            Write-Host "::group::ruby-runtime/windows contents"
+            if (Test-Path 'ruby-runtime/windows') { Get-ChildItem ruby-runtime/windows | Format-Table } else { Write-Host '<missing>' }
+            Write-Host "::endgroup::"
+            Write-Host "::group::target/appassembler contents"
+            Get-ChildItem target/appassembler | Format-Table
+            Write-Host "::endgroup::"
+            exit 1
+          }
+          Write-Host "Bundled CRuby OK: $ruby"
+
       - name: Build Windows installer (Inno Setup)
         shell: pwsh
         run: |
           ./scripts/internal/build_windows_installer.ps1 `
             -JavaHome "$env:JAVA_HOME" `
-            -OutputDir "$PWD/target"
+            -OutputDir "$PWD/target" `
+            -RequireBundledRuby
 
       - name: Stage installer
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path staging | Out-Null
           Copy-Item target/AsciidocFX-*-Setup.exe staging/
+          Copy-Item target/AsciidocFX-*-payload-manifest.txt staging/ -ErrorAction SilentlyContinue
           Get-ChildItem staging
 
       - uses: actions/upload-artifact@v4
         with:
           name: asciidocfx-windows-installer
-          path: staging/*.exe
+          path: staging/*
           if-no-files-found: error
 
   # ---------------------------------------------------------------------------
