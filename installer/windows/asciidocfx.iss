@@ -175,17 +175,22 @@ begin
     Log('  ruby.exe         exists=' + BoolToStr(RubyExeOk, True));
     Log('  asciidoctor-pdf  exists=' + BoolToStr(AdocPdfOk, True));
     if not WizardSilent then begin
+      { Build the message body. NOTE: do NOT start a line with `#13#10` --
+        Inno's ISPP preprocessor treats a `#` at the first non-whitespace
+        position as a directive, parses `#13` as directive name "13", and
+        aborts with "Unknown preprocessor directive". Concatenate
+        line-breaks at the END of the previous line, or via Chr() calls. }
       Note :=
-        'AsciidocFX installed successfully, but the bundled Ruby runtime is incomplete:' + #13#10 +
-        #13#10 +
-        '  ruby.exe        : ' + BoolToStr(RubyExeOk, True) + #13#10 +
-        '  asciidoctor-pdf : ' + BoolToStr(AdocPdfOk, True) + #13#10 +
-        #13#10 +
-        'PDF export will fall back to the slower in-process JRuby renderer.' + #13#10 +
-        #13#10 +
-        'A diagnostic log has been written to:' + #13#10 +
-        '  ' + LogDest + #13#10 +
-        #13#10 +
+        'AsciidocFX installed successfully, but the bundled Ruby runtime is incomplete:' + Chr(13) + Chr(10) +
+        Chr(13) + Chr(10) +
+        '  ruby.exe        : ' + BoolToStr(RubyExeOk, True) + Chr(13) + Chr(10) +
+        '  asciidoctor-pdf : ' + BoolToStr(AdocPdfOk, True) + Chr(13) + Chr(10) +
+        Chr(13) + Chr(10) +
+        'PDF export will fall back to the slower in-process JRuby renderer.' + Chr(13) + Chr(10) +
+        Chr(13) + Chr(10) +
+        'A diagnostic log has been written to:' + Chr(13) + Chr(10) +
+        '  ' + LogDest + Chr(13) + Chr(10) +
+        Chr(13) + Chr(10) +
         'Please attach that file to a bug report so the build can be fixed.';
       MsgBox(Note, mbInformation, MB_OK);
     end;
