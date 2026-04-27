@@ -331,8 +331,16 @@ if (Test-Path (Join-Path $jfxJarsDir 'bin\javafx_iio.dll')) {
     Write-Host "[setup] OK: JavaFX SDK present at jmods\windows-jars\ (use -Force to re-download)"
 } else {
     Write-Host "[setup] Downloading JavaFX SDK ..."
+    # NOTE: use truthy `if ($LASTEXITCODE)` rather than `-ne 0`. When the
+    # sub-script runs only PS cmdlets (no native commands) AND no native
+    # command ran earlier in this session, $LASTEXITCODE is $null --
+    # PowerShell evaluates `$null -ne 0` as $true, which would `exit`
+    # this script silently. Truthy form treats both 0 and $null as
+    # success. This bug bit CI when invoked with -SkipPrereqs (which
+    # skips the prerequisite block where every other native command
+    # lives), making setup return 0 without ever bundling CRuby.
     & (Join-Path $internal 'download_javafx_jars.ps1')
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    if ($LASTEXITCODE) { exit $LASTEXITCODE }
 }
 
 # --- Bundled CRuby (optional) ---------------------------------------------
@@ -345,7 +353,19 @@ if ($WithRuby) {
     }
     Write-Host "[setup] Bundling portable CRuby runtime ..."
     & (Join-Path $internal 'bundle_ruby_runtime.ps1')
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+    # Belt-and-suspenders: confirm the bundle actually produced the file
+    # the installer pipeline depends on. If the sub-script silently no-op'd
+    # (e.g. partially-populated tree it thought was complete), surface it
+    # here rather than discovering it three steps later in the Inno Setup
+    # build.
+    $rubyBat = Join-Path $rubyDir 'bin\asciidoctor-pdf.bat'
+    if (-not (Test-Path $rubyBat)) {
+        Write-Error "[setup] Bundled CRuby runtime missing $rubyBat after bundle_ruby_runtime.ps1 ran. The installer payload will be incomplete."
+        exit 1
+    }
+    Write-Host "[setup] OK: bundled CRuby ready ($rubyBat)"
 }
 
 Write-Host ""

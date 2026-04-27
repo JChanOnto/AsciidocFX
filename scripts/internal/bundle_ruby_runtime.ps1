@@ -117,3 +117,7 @@ if ($LASTEXITCODE -ne 0) {
 Remove-Item -Recurse -Force $tmpDir
 Write-Host ""
 Write-Host "Bundled Ruby runtime ready at: $runtimeDir"
+
+# Same reason as download_javafx_jars.ps1: force an explicit exit code so
+# the caller's `if ($LASTEXITCODE)` check is reliable.
+exit 0

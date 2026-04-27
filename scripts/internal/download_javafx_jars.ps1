@@ -33,3 +33,9 @@ Remove-Item $Zip
 
 Write-Host "Done. Add the following to PATH before running:"
 Write-Host "  $Out\bin"
+
+# Force an explicit exit code so the caller's `if ($LASTEXITCODE)` check
+# is meaningful. Without this, $LASTEXITCODE in the caller is unchanged
+# from whatever (possibly $null) it was before -- this script runs only
+# PS cmdlets, none of which set $LASTEXITCODE.
+exit 0
