@@ -135,9 +135,15 @@ Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#MyAppName}}
        message box pointing at install-log.txt.
   ---------------------------------------------------------------------------- }
 
+// Pascal Script in Inno Setup does not have BoolToStr; provide our own.
+function BoolStr(B: Boolean): string;
+begin
+  if B then Result := 'True' else Result := 'False';
+end;
+
 procedure VerifyBundledRubyAndWriteLog;
 var
-  RubyExe, AdocPdfBat, LogDest, RubyDir, Note: string;
+  RubyExe, AdocPdfBat, LogDest, RubyDir, Note, SetupLog: string;
   RubyExeOk, AdocPdfOk: Boolean;
   LogLines: TArrayOfString;
 begin
@@ -149,42 +155,49 @@ begin
   RubyExeOk := FileExists(RubyExe);
   AdocPdfOk := FileExists(AdocPdfBat);
 
-  { Mirror Inno's auto-generated setup log next to the install for easy access. }
-  if GetSetupLogFileName <> '' then begin
-    if not FileCopy(GetSetupLogFileName, LogDest, False) then
+  // Mirror Inno's auto-generated setup log next to the install for easy
+  // access. ExpandConstant of the log constant resolves to the active
+  // setup log path when SetupLogging=yes (returns '' if logging is off).
+  // Use // line comments here -- a Pascal block comment containing the
+  // literal {log} would terminate at the inner } and break compilation.
+  SetupLog := ExpandConstant('{log}');
+  if (SetupLog <> '') and FileExists(SetupLog) then begin
+    // CopyFile (renamed from the deprecated FileCopy) returns False if the
+    // destination already exists and FailIfExists is True; we pass False so
+    // re-installs overwrite cleanly.
+    if not CopyFile(SetupLog, LogDest, False) then
       Log('Could not copy setup log to ' + LogDest);
   end;
 
-  { Append a bundled-Ruby section so it's the first thing visible in the file. }
+  // Append a bundled-Ruby section so it's the first thing visible in the file.
   SetArrayLength(LogLines, 8);
   LogLines[0] := '';
   LogLines[1] := '================================================================';
   LogLines[2] := '  Bundled CRuby payload check (post-install)';
   LogLines[3] := '================================================================';
   LogLines[4] := '  Install dir      : ' + ExpandConstant('{app}');
-  LogLines[5] := '  ruby.exe         : ' + RubyExe + '   ' + Format('exists=%s', [BoolToStr(RubyExeOk, True)]);
-  LogLines[6] := '  asciidoctor-pdf  : ' + AdocPdfBat + '   ' + Format('exists=%s', [BoolToStr(AdocPdfOk, True)]);
+  LogLines[5] := '  ruby.exe         : ' + RubyExe + '   exists=' + BoolStr(RubyExeOk);
+  LogLines[6] := '  asciidoctor-pdf  : ' + AdocPdfBat + '   exists=' + BoolStr(AdocPdfOk);
   LogLines[7] := '================================================================';
   if not SaveStringsToFile(LogDest, LogLines, True) then
     Log('Could not append bundled-Ruby summary to ' + LogDest);
 
-  { Loud warning if anything is missing. Skipped in silent installs (/SILENT)
-    so unattended deploys don't block on a messagebox. }
+  // Loud warning if anything is missing. Skipped in silent installs (/SILENT)
+  // so unattended deploys don't block on a messagebox.
   if (not RubyExeOk) or (not AdocPdfOk) then begin
     Log('WARNING: Bundled CRuby payload incomplete.');
-    Log('  ruby.exe         exists=' + BoolToStr(RubyExeOk, True));
-    Log('  asciidoctor-pdf  exists=' + BoolToStr(AdocPdfOk, True));
+    Log('  ruby.exe         exists=' + BoolStr(RubyExeOk));
+    Log('  asciidoctor-pdf  exists=' + BoolStr(AdocPdfOk));
     if not WizardSilent then begin
-      { Build the message body. NOTE: do NOT start a line with `#13#10` --
-        Inno's ISPP preprocessor treats a `#` at the first non-whitespace
-        position as a directive, parses `#13` as directive name "13", and
-        aborts with "Unknown preprocessor directive". Concatenate
-        line-breaks at the END of the previous line, or via Chr() calls. }
+      // Build the message body. NOTE: do NOT start a line with #13#10 --
+      // Inno's ISPP preprocessor treats # at the first non-whitespace
+      // position as a directive, parses #13 as directive name "13", and
+      // aborts with "Unknown preprocessor directive". Use Chr() calls.
       Note :=
         'AsciidocFX installed successfully, but the bundled Ruby runtime is incomplete:' + Chr(13) + Chr(10) +
         Chr(13) + Chr(10) +
-        '  ruby.exe        : ' + BoolToStr(RubyExeOk, True) + Chr(13) + Chr(10) +
-        '  asciidoctor-pdf : ' + BoolToStr(AdocPdfOk, True) + Chr(13) + Chr(10) +
+        '  ruby.exe        : ' + BoolStr(RubyExeOk) + Chr(13) + Chr(10) +
+        '  asciidoctor-pdf : ' + BoolStr(AdocPdfOk) + Chr(13) + Chr(10) +
         Chr(13) + Chr(10) +
         'PDF export will fall back to the slower in-process JRuby renderer.' + Chr(13) + Chr(10) +
         Chr(13) + Chr(10) +
