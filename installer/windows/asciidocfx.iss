@@ -80,6 +80,8 @@ Name: "associate";   Description: "Associate AsciiDoc files (.adoc, .asciidoc, .
 Source: "{#StagingDir}\app\*";     DestDir: "{app}\app";     Flags: recursesubdirs createallsubdirs ignoreversion
 ; Bundled JRE (-> {app}\runtime\)
 Source: "{#StagingDir}\runtime\*"; DestDir: "{app}\runtime"; Flags: recursesubdirs createallsubdirs ignoreversion
+; JavaFX SDK (-> {app}\javafx\) — referenced by launcher.bat via --module-path.
+Source: "{#StagingDir}\javafx\*";  DestDir: "{app}\javafx";  Flags: recursesubdirs createallsubdirs ignoreversion
 ; Top-level launcher that points JAVACMD at the bundled JRE
 Source: "{#StagingDir}\launcher.bat"; DestDir: "{app}"; Flags: ignoreversion
 ; License file

@@ -79,6 +79,20 @@ Write-Host "[installer] Staging runtime/ (JRE) ..."
 $runtimeDst = New-Item -ItemType Directory -Force -Path (Join-Path $staging 'runtime')
 Copy-Item -Recurse -Force "$JavaHome\*" $runtimeDst.FullName
 
+# JavaFX SDK — the bundled Temurin JDK does NOT include JavaFX modules.
+# (install4j used to jlink jmods/windows/*.jmod into a custom JRE; we ship
+# the stock JRE + the JavaFX SDK on the side, then point the launcher at
+# it via --module-path. lib/ holds the module jars; bin/ holds the native
+# DLLs that QuantumRenderer / WebKit dlopen at runtime.)
+$jfxSdk = Join-Path $repoRoot 'jmods\windows-jars'
+if (-not (Test-Path (Join-Path $jfxSdk 'lib\javafx.controls.jar'))) {
+    throw "JavaFX SDK not found at '$jfxSdk' (missing lib\javafx.controls.jar). Run scripts\setup.ps1 first."
+}
+Write-Host "[installer] Staging javafx/ (JavaFX SDK lib + bin) ..."
+$jfxDst = New-Item -ItemType Directory -Force -Path (Join-Path $staging 'javafx')
+Copy-Item -Recurse -Force (Join-Path $jfxSdk 'lib') $jfxDst.FullName
+Copy-Item -Recurse -Force (Join-Path $jfxSdk 'bin') $jfxDst.FullName
+
 Write-Host "[installer] Staging launcher.bat ..."
 Copy-Item (Join-Path $repoRoot 'installer\windows\launcher.bat') $staging
 
