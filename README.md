@@ -25,7 +25,7 @@ casual editing, but breaks down for projects that:
 - Want a **preview pane that matches the actual PDF output** (theme,
   fonts, pagination) instead of a CSS approximation
 - Want **fast PDF export** without giving up the zero-install promise
-  (this fork can ship a portable CRuby in the install4j package)
+  (this fork can ship a portable CRuby in the build artifact)
 
 Out of the box, AsciidocFX would ignore all of these unless the user manually
 copied them into `~/.AsciidocFX-<version>/asciidoctor_pdf.json` etc. — and
@@ -127,7 +127,7 @@ big books — Prawn-on-the-JVM has measurable per-page overhead. This
 fork adds an optional shell-out to a CRuby `asciidoctor-pdf`, used by
 both the live preview *and* `Save → PDF`. Two ways in:
 
-- **Bundled with the install4j package** *(zero user setup)*. Run
+- **Bundled with the build artifact** *(zero user setup)*. Run
   `scripts\build.ps1 -WithRuby` (Windows) or
   `scripts/build.sh --with-ruby` (macOS/Linux) — these wrappers invoke
   the underlying [`scripts/internal/bundle_ruby_runtime.ps1`](scripts/internal/bundle_ruby_runtime.ps1)
@@ -286,7 +286,9 @@ The pom auto-detects your OS and points `--module-path` at the right
 
 A plain `mvn package` only produces `target/AsciidocFX.jar`. To get a runnable
 launcher script (and a portable zip distribution), use the build wrapper —
-it runs setup if needed, then invokes the `install4j-package` Maven profile:
+it runs setup if needed, then invokes the `install4j-package` Maven
+profile (the historical name is retained — it no longer touches
+install4j; it just produces the appassembler tree + portable zip):
 
 ```powershell
 # Windows
@@ -328,13 +330,125 @@ After a successful build:
 
 | Artifact                                              | What it is                                                  |
 | ----------------------------------------------------- | ----------------------------------------------------------- |
-| `target/appassembler/bin/asciidocfx.bat`              | Windows launcher — **double-click or run from a terminal**. |
-| `target/appassembler/bin/asciidocfx`                  | macOS / Linux launcher — `chmod +x` then run.               |
+| `target/appassembler/bin/asciidocfx.bat`              | Windows launcher — **does not work standalone** (no JavaFX); use the installer or `scripts\run.ps1` instead. |
+| `target/appassembler/bin/asciidocfx`                  | macOS / Linux launcher — same caveat as above.              |
 | `target/appassembler/lib/`                            | All runtime jars (flat layout).                             |
 | `target/appassembler/conf/`                           | Editor / Asciidoctor / theme config.                        |
-| `target/asciidocfx-<version>.zip`                     | Portable bundle of the above — unzip anywhere and run.      |
+| `target/asciidocfx-<version>.zip`                     | Portable bundle of the appassembler tree.                   |
 | `target/AsciidocFX.jar`                               | Bare jar (no classpath) — for embedding only.               |
-| `target/asciidocfx_*.exe`, `*.dmg`, `*.deb`, `*.rpm`  | Native installers — only when the `install4j-build` profile runs (CI). |
+| `target/AsciidocFX-<version>-Setup.exe`               | Windows installer — only when [`scripts\internal\build_windows_installer.ps1`](scripts/internal/build_windows_installer.ps1) is run after `scripts\build.ps1` (see below). |
+
+## Windows installer
+
+The Windows installer (`AsciidocFX-<ver>-Setup.exe`) is built with the
+free [Inno Setup 6](https://jrsoftware.org/isinfo.php) toolchain — no
+proprietary install4j license / signing certs required. install4j was
+removed in commit `a15766a4`; see [`installer/windows/asciidocfx.iss`](installer/windows/asciidocfx.iss)
+for the script.
+
+### What it ships
+
+The installer bundles everything an end user needs to run AsciidocFX with
+*no system Java install*:
+
+```
+<install dir>\
+  app\           appassembler tree (jars, conf, ruby/ if -WithRuby)
+  runtime\       Temurin JDK 25 (whatever JAVA_HOME pointed at)
+  javafx\        JavaFX 25 SDK (lib\*.jar + bin\*.dll)
+  launcher.bat   wrapper: sets JAVACMD/JAVA_OPTS/PATH, chains to app\bin\asciidocfx.bat
+  LICENSE.txt
+```
+
+The wrapper [`launcher.bat`](installer/windows/launcher.bat) is the
+piece that makes the stock Temurin JDK work with appassembler's
+`--add-modules=javafx.controls,...` line: it prepends `--module-path
+"<install>\javafx\lib"` to `JAVA_OPTS` and puts `<install>\javafx\bin`
+on `PATH` so JavaFX's `QuantumRenderer` and WebKit can dlopen
+`prism_d3d.dll`, `javafx_iio.dll`, `jfxwebkit.dll`, etc. (install4j
+used to jlink the JavaFX jmods into a custom JRE — we ship the SDK on
+the side instead.)
+
+### Build it locally
+
+```powershell
+# 1. Produce the appassembler tree (run from a Developer PowerShell)
+.\scripts\build.ps1 -WithRuby
+
+# 2. Install Inno Setup 6 if you don't have it (one-time)
+choco install innosetup -y
+
+# 3. Stage payload + run iscc.exe -> target\AsciidocFX-<ver>-Setup.exe
+.\scripts\internal\build_windows_installer.ps1
+```
+
+Key `build_windows_installer.ps1` parameters:
+
+| Param           | Default                                                          |
+| --------------- | ---------------------------------------------------------------- |
+| `-Version`      | parsed from `pom.xml`                                            |
+| `-JavaHome`     | `$env:JAVA_HOME` — must be a JDK with `bin\java.exe`             |
+| `-IsccPath`     | `iscc.exe` on PATH, falls back to `Program Files\Inno Setup 6\`  |
+| `-OutputDir`    | `target\`                                                        |
+| `-IconFile`     | `src\main\resources\logo.png` (converted to `.ico` via ImageMagick if `magick` is on PATH; falls back to `conf\public\favicon.ico`) |
+
+### Installer behavior
+
+- **Per-user install by default** (`PrivilegesRequired=lowest`,
+  overridable in the wizard). No admin prompt unless the user picks
+  Program Files.
+- **AppId** is the legacy install4j applicationId
+  (`{7853-9376-5862-1224}`) so existing install4j-installed copies
+  upgrade in place.
+- **File associations** for `.adoc`, `.asciidoc`, `.ad`, `.asc`
+  (optional task in the wizard).
+- **Start Menu** + optional desktop shortcut.
+- **Uninstaller** registered in Add/Remove Programs.
+- Binaries are **not Authenticode-signed** — SmartScreen will warn on
+  first run. Free signing isn't really a thing on Windows; if you want
+  to sign, set `SignTool` in [`asciidocfx.iss`](installer/windows/asciidocfx.iss)
+  and provide a cert.
+
+## Release workflow (CI)
+
+[`.github/workflows/release.yml`](.github/workflows/release.yml) builds
+and publishes the Windows installer on every `v*` tag push (and on
+manual `workflow_dispatch`):
+
+1. **`build` job** (`windows-latest`):
+   - Checks out, sets up JDK 25 (Temurin) + Node LTS
+   - `choco install graphviz 7zip innosetup` + `npm i -g @mermaid-js/mermaid-cli`
+   - `scripts/setup.ps1 -SkipPrereqs -WithRuby` — downloads JavaFX SDK +
+     bundles portable CRuby into `ruby-runtime/windows/`
+   - `scripts/build.ps1 -SkipSetup -WithRuby` — runs the Maven
+     `install4j-package` profile to produce `target/appassembler/`
+   - `scripts/internal/build_windows_installer.ps1` — stages payload +
+     runs Inno Setup
+   - Uploads `staging/AsciidocFX-<ver>-Setup.exe` as an artifact
+
+2. **`release` job** (`ubuntu-latest`, `needs: build`):
+   - Downloads the installer artifact
+   - Generates `RELEASE_NOTES.md` from the top section of
+     [`CHANGELOG.md`](CHANGELOG.md) + appends a SHA-256 table
+   - `softprops/action-gh-release@v2` creates/updates the GitHub Release
+     for the tag and attaches `dist/*.exe`
+
+macOS / Linux installer jobs are present but commented out in
+[`release.yml`](.github/workflows/release.yml) — the disabled blocks
+document exactly how to re-enable `.dmg` / `.deb` builds (and which
+scripts to restore from git history; see commits `528ac37d` /
+`a15766a4`).
+
+### Cutting a release
+
+```powershell
+git tag v1.8.12
+git push origin v1.8.12
+# Workflow runs; release appears at https://github.com/<owner>/AsciidocFX/releases/tag/v1.8.12
+```
+
+Or trigger from the Actions tab via *Run workflow* and enter the tag
+name; the workflow will create the tag if it doesn't exist.
 
 ### Run it
 
@@ -360,18 +474,33 @@ somewhere non-default.
 
 ### Run the packaged launcher
 
-The launcher script under `target/appassembler/bin/` is intended for the
-install4j-bundled distribution (which ships its own JRE). Running it
-directly against a system JDK requires injecting JavaFX yourself:
+The appassembler launcher under `target/appassembler/bin/` does **not**
+run standalone — it expects a JRE that contains JavaFX modules
+(`--add-modules=javafx.controls,...`). The stock Temurin JDK we bundle
+has no JavaFX, so direct invocation fails with `module javafx.controls
+not found`.
 
-```powershell
-# Windows
-$env:Path     = "$PWD\jmods\windows-jars\bin;$env:Path"
-$env:JAVA_OPTS = "--module-path `"$PWD\jmods\windows-jars\lib`""
-.\target\appassembler\bin\asciidocfx.bat
-```
+Three ways around it:
 
-For day-to-day development, prefer `mvn -P local-run spring-boot:run`.
+1. **Install the `.exe`** (recommended for end users) — see
+   [Windows installer](#windows-installer) above. The installed wrapper
+   `launcher.bat` wires up JavaFX automatically.
+
+2. **Inject JavaFX manually** for a one-off smoke test of the
+   appassembler tree:
+
+   ```powershell
+   # Windows
+   $env:Path     = "$PWD\jmods\windows-jars\bin;$env:Path"
+   $env:JAVA_OPTS = "--module-path `"$PWD\jmods\windows-jars\lib`""
+   .\target\appassembler\bin\asciidocfx.bat
+   ```
+
+3. **Use the dev wrapper** — `scripts\run.ps1` does the same `PATH` /
+   `JAVA_OPTS` injection plus runs via Maven so you get hot reload.
+
+For day-to-day development, prefer `scripts\run.ps1` (or `mvn -P
+local-run spring-boot:run` directly).
 
 For the full upstream build/run/contributing notes see
 [`README.adoc`](README.adoc) and [`CONTRIBUTING.md`](CONTRIBUTING.md).
@@ -393,7 +522,12 @@ conflicts in:
 - `conf/public/mermaid.html`
 - `conf/public/js/prototypes.js`
 - `conf/public/js/asciidoctor-block-extensions.js`
-- `pom.xml` (install4j-package profile bundles `ruby-runtime/<os>/`)
+- `pom.xml` (install4j-package profile bundles `ruby-runtime/<os>/`;
+  install4j-build profile and asciidocfx.install4j project file have
+  been removed)
+- `installer/windows/` and `scripts/internal/build_windows_installer.ps1`
+  (Inno Setup replacement for install4j on Windows)
+- `.github/workflows/release.yml` (Windows-only installer build pipeline)
 
 The new `ProjectConfigDiscovery.java`, `PdfPreviewPane.java`,
 `PdfRenderer.java`, `PreviewSourceResolver.java`, `PreviewBackend.java`,
