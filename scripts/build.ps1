@@ -49,4 +49,4 @@ finally {
 Write-Host ""
 Write-Host "[build] Done. Artifacts:"
 Write-Host "  target\appassembler\bin\asciidocfx.bat   (launcher)"
-Write-Host "  target\appassembler\                     (payload — feeds installer/windows)"
+Write-Host "  target\asciidocfx-*.zip                  (portable bundle)"

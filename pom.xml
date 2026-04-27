@@ -667,6 +667,10 @@
                                                      erroronmissingdir="false"/>
                                         </copy>
                                         <echo>Bundled Ruby runtime present: ${afx.ruby.bundled}</echo>
+
+                                        <zip destfile="${project.build.directory}/asciidocfx-${project.version}.zip"
+                                             basedir="${project.build.directory}/appassembler/">
+                                        </zip>
                                     </target>
                                 </configuration>
                             </execution>

@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # scripts/build.sh
 #
-# Package AsciidocFX into target/appassembler/ (the payload that
-# scripts/internal/build_windows_installer.ps1 wraps with Inno Setup).
+# Package AsciidocFX into target/appassembler/ + target/asciidocfx-<ver>.zip.
 #
 # By default this:
 #   1. Runs scripts/setup.sh (downloads JavaFX SDK if missing)
@@ -46,5 +45,5 @@ cat <<'EOF'
 
 [build] Done. Artifacts:
   target/appassembler/bin/asciidocfx       (launcher)
-  target/appassembler/                     (payload — feeds installer/windows)
+  target/asciidocfx-*.zip                  (portable bundle)
 EOF
