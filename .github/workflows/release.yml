@@ -85,6 +85,68 @@ jobs:
           path: staging/*.exe
           if-no-files-found: error
 
+  # ---------------------------------------------------------------------------
+  # macOS / Linux installer jobs are intentionally disabled.
+  #
+  # When ready to ship cross-platform installers again:
+  #   1. Restore scripts/internal/build_macos_installer.sh and
+  #      scripts/internal/build_linux_installer.sh (see commit 528ac37d for
+  #      the deleted versions, or a15766a4 for the original implementation).
+  #   2. Uncomment the two job blocks below.
+  #   3. Add the artifact globs to the `release` job's `files:` list:
+  #        files: |
+  #          dist/*.exe
+  #          dist/*.dmg
+  #          dist/*.deb
+  #
+  # build-macos:
+  #   runs-on: macos-latest
+  #   defaults: { run: { shell: bash } }
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - uses: actions/setup-java@v4
+  #       with: { java-version: '25', distribution: 'temurin', cache: maven }
+  #     - uses: actions/setup-node@v4
+  #       with: { node-version: 'lts/*' }
+  #     - run: brew install graphviz ruby-build
+  #     - run: npm install -g @mermaid-js/mermaid-cli
+  #     - run: chmod +x scripts/*.sh scripts/internal/*.sh
+  #     - run: ./scripts/setup.sh --skip-prereqs --with-ruby
+  #     - run: ./scripts/build.sh --skip-setup --with-ruby
+  #     - run: ./scripts/internal/build_macos_installer.sh --java-home "$JAVA_HOME" --output "$PWD/target"
+  #     - uses: actions/upload-artifact@v4
+  #       with:
+  #         name: asciidocfx-macos-installer
+  #         path: target/AsciidocFX-*.dmg
+  #         if-no-files-found: error
+  #
+  # build-linux:
+  #   runs-on: ubuntu-latest
+  #   defaults: { run: { shell: bash } }
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - uses: actions/setup-java@v4
+  #       with: { java-version: '25', distribution: 'temurin', cache: maven }
+  #     - uses: actions/setup-node@v4
+  #       with: { node-version: 'lts/*' }
+  #     - run: |
+  #         sudo apt-get update
+  #         sudo apt-get install -y graphviz autoconf bison build-essential \
+  #           libssl-dev libyaml-dev libreadline-dev zlib1g-dev libncurses-dev \
+  #           libffi-dev libgdbm-dev
+  #         git clone --depth 1 https://github.com/rbenv/ruby-build.git "$HOME/.rbenv/plugins/ruby-build"
+  #     - run: npm install -g @mermaid-js/mermaid-cli
+  #     - run: chmod +x scripts/*.sh scripts/internal/*.sh
+  #     - run: ./scripts/setup.sh --skip-prereqs --with-ruby
+  #     - run: ./scripts/build.sh --skip-setup --with-ruby
+  #     - run: ./scripts/internal/build_linux_installer.sh --java-home "$JAVA_HOME" --output "$PWD/target"
+  #     - uses: actions/upload-artifact@v4
+  #       with:
+  #         name: asciidocfx-linux-installer
+  #         path: target/asciidocfx_*.deb
+  #         if-no-files-found: error
+  # ---------------------------------------------------------------------------
+
   release:
     needs: build
     runs-on: ubuntu-latest
