@@ -37,10 +37,13 @@
 #define MyAppPublisher   "AsciidocFX"
 #define MyAppURL         "https://asciidocfx.com"
 #define MyAppExeName     "launcher.bat"
-#define MyAppId          "{{7853-9376-5862-1224}"
 
 [Setup]
-AppId={{#MyAppId}}
+; AppId uniquely identifies the app for upgrade/uninstall. The leading
+; "{{" is Inno's escape for a single literal "{" — the actual AppId stored
+; in the registry is "{7853-9376-5862-1224}" (matching the legacy
+; install4j applicationId, so existing installs upgrade in place).
+AppId={{7853-9376-5862-1224}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppVerName={#MyAppName} {#MyAppVersion}
