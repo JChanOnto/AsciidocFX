@@ -1,23 +1,15 @@
 # .github/workflows/release.yml
 #
-# Build portable AsciidocFX zips on Windows / macOS / Linux using the
-# scripts/build.{ps1,sh} entry points (i.e. the same path a developer would
-# take locally), bundle a portable CRuby runtime into each, and attach the
-# resulting zips to a GitHub Release.
+# Build the Windows Inno Setup installer for AsciidocFX and attach it to a
+# GitHub Release. Portable zip artifacts and macOS/Linux native installers
+# have been removed — the Windows .exe installer (built with the free Inno
+# Setup 6 toolchain) is now the sole release artifact.
 #
 # Triggers:
-#   * push of a tag matching v*  -> builds + creates a draft release for that tag
+#   * push of a tag matching v*  -> builds + creates a release for that tag
 #   * workflow_dispatch          -> manual trigger; enter the tag name in the UI
-#
-# In addition to the portable zips, this workflow now also builds free,
-# unsigned native installers via open-source toolchains:
-#   * Windows : Inno Setup 6 -> AsciidocFX-<ver>-Setup.exe   (REQUIRED)
-#   * macOS   : hdiutil      -> AsciidocFX-<ver>.dmg         (best-effort)
-#   * Linux   : dpkg-deb     -> asciidocfx_<ver>_amd64.deb   (best-effort)
-#
-# No install4j license or paid code-signing cert is required.
 
-name: Release (portable zips + installers)
+name: Release (Windows Inno Setup installer)
 
 on:
   workflow_dispatch:
@@ -34,30 +26,10 @@ permissions:
 
 jobs:
   build:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: windows-latest
-            label: windows
-            shell: pwsh
-            build_cmd: ./scripts/build.ps1 -SkipSetup -WithRuby
-            setup_cmd: pwsh -NoProfile -File scripts/setup.ps1 -SkipPrereqs -WithRuby
-          - os: macos-latest
-            label: mac
-            shell: bash
-            build_cmd: ./scripts/build.sh --skip-setup --with-ruby
-            setup_cmd: ./scripts/setup.sh --skip-prereqs --with-ruby
-          - os: ubuntu-latest
-            label: linux
-            shell: bash
-            build_cmd: ./scripts/build.sh --skip-setup --with-ruby
-            setup_cmd: ./scripts/setup.sh --skip-prereqs --with-ruby
-
-    runs-on: ${{ matrix.os }}
+    runs-on: windows-latest
     defaults:
       run:
-        shell: ${{ matrix.shell }}
+        shell: pwsh
 
     steps:
       - uses: actions/checkout@v4
@@ -74,121 +46,43 @@ jobs:
         with:
           node-version: 'lts/*'
 
-      - name: Install Mermaid CLI + Graphviz (Linux)
-        if: matrix.os == 'ubuntu-latest'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y graphviz
-          npm install -g @mermaid-js/mermaid-cli
-
-      - name: Install Mermaid CLI + Graphviz (macOS)
-        if: matrix.os == 'macos-latest'
-        run: |
-          brew install graphviz
-          npm install -g @mermaid-js/mermaid-cli
-
-      - name: Install Mermaid CLI + Graphviz + 7-Zip (Windows)
-        if: matrix.os == 'windows-latest'
+      - name: Install Mermaid CLI + Graphviz + 7-Zip + Inno Setup
         shell: pwsh
         run: |
-          choco install graphviz 7zip --no-progress -y
+          choco install graphviz 7zip innosetup --no-progress -y
           npm install -g '@mermaid-js/mermaid-cli'
 
-      # ruby-build is required by scripts/internal/bundle_ruby_runtime.sh to
-      # compile a relocatable CRuby into ruby-runtime/<os>/.  On Linux it
-      # also needs a C toolchain + the standard set of CRuby build deps
-      # (libssl, libreadline, zlib, libffi, libyaml).  macOS gets these via
-      # the brew formula's transitive deps.
-      - name: Install ruby-build + CRuby build deps (Linux)
-        if: matrix.os == 'ubuntu-latest'
-        run: |
-          sudo apt-get install -y \
-            autoconf bison build-essential libssl-dev libyaml-dev \
-            libreadline-dev zlib1g-dev libncurses-dev libffi-dev libgdbm-dev
-          git clone --depth 1 https://github.com/rbenv/ruby-build.git "$HOME/.rbenv/plugins/ruby-build"
-
-      - name: Install ruby-build (macOS)
-        if: matrix.os == 'macos-latest'
-        run: brew install ruby-build
-
-      # Run setup with --skip-prereqs / -SkipPrereqs to avoid re-installing the
-      # toolchain (already provided above by setup-java / setup-node / brew /
-      # apt / choco). This step downloads the JavaFX SDK and bundles a portable
-      # CRuby runtime into ruby-runtime/<os>/ so the install4j-package maven
-      # profile (now used only for the appassembler payload, not install4j)
-      # picks it up and ships the fast native-Ruby PDF render path.
-      - name: Ensure shell scripts are executable (mac/linux)
-        if: runner.os != 'Windows'
-        shell: bash
-        run: chmod +x scripts/*.sh scripts/internal/*.sh
-
+      # Run setup with -SkipPrereqs to avoid re-installing the toolchain
+      # (already provided above by setup-java / setup-node / choco). This step
+      # downloads the JavaFX SDK and bundles a portable CRuby runtime into
+      # ruby-runtime/windows/ so the appassembler payload picks it up and ships
+      # the fast native-Ruby PDF render path.
       - name: Download JavaFX SDK + bundle CRuby runtime
-        shell: bash
-        run: ${{ matrix.setup_cmd }}
-
-      - name: Build portable zip (with bundled Ruby)
-        run: ${{ matrix.build_cmd }}
-
-      # ---------------- Native installers (free toolchains) ----------------
-
-      - name: Install Inno Setup (Windows)
-        if: matrix.os == 'windows-latest'
         shell: pwsh
-        run: choco install innosetup --no-progress -y
+        run: pwsh -NoProfile -File scripts/setup.ps1 -SkipPrereqs -WithRuby
+
+      - name: Build appassembler payload (Maven)
+        shell: pwsh
+        run: ./scripts/build.ps1 -SkipSetup -WithRuby
 
       - name: Build Windows installer (Inno Setup)
-        if: matrix.os == 'windows-latest'
         shell: pwsh
         run: |
           ./scripts/internal/build_windows_installer.ps1 `
             -JavaHome "$env:JAVA_HOME" `
             -OutputDir "$PWD/target"
 
-      - name: Build macOS installer (.dmg)
-        if: matrix.os == 'macos-latest'
-        shell: bash
+      - name: Stage installer
+        shell: pwsh
         run: |
-          chmod +x scripts/internal/build_macos_installer.sh
-          ./scripts/internal/build_macos_installer.sh \
-            --java-home "$JAVA_HOME" \
-            --output "$PWD/target"
-
-      - name: Build Linux installer (.deb)
-        if: matrix.os == 'ubuntu-latest'
-        shell: bash
-        run: |
-          chmod +x scripts/internal/build_linux_installer.sh
-          ./scripts/internal/build_linux_installer.sh \
-            --java-home "$JAVA_HOME" \
-            --output "$PWD/target"
-
-      # ---------------- Stage + upload artifacts ----------------
-
-      - name: Stage release artifacts
-        shell: bash
-        run: |
-          mkdir -p staging
-          # Rename portable zips per-OS so artifacts don't collide.
-          for f in target/asciidocfx-*.zip; do
-            [ -e "$f" ] || continue
-            base="$(basename "$f" .zip)"
-            cp "$f" "staging/${base}-${{ matrix.label }}.zip"
-          done
-          # Native installers (already uniquely named per OS).
-          for f in target/AsciidocFX-*-Setup.exe target/AsciidocFX-*.dmg target/asciidocfx_*.deb; do
-            [ -e "$f" ] || continue
-            cp "$f" "staging/$(basename "$f")"
-          done
-          ls -l staging
+          New-Item -ItemType Directory -Force -Path staging | Out-Null
+          Copy-Item target/AsciidocFX-*-Setup.exe staging/
+          Get-ChildItem staging
 
       - uses: actions/upload-artifact@v4
         with:
-          name: asciidocfx-${{ matrix.label }}
-          path: |
-            staging/*.zip
-            staging/*.exe
-            staging/*.dmg
-            staging/*.deb
+          name: asciidocfx-windows-installer
+          path: staging/*.exe
           if-no-files-found: error
 
   release:
@@ -209,7 +103,7 @@ jobs:
           echo "## SHA-256" >> RELEASE_NOTES.md
           echo "| File | SHA-256 |" >> RELEASE_NOTES.md
           echo "| --- | --- |" >> RELEASE_NOTES.md
-          (cd dist && sha256sum *.zip *.exe *.dmg *.deb 2>/dev/null) | awk '{print "| "$2" | "$1" |"}' >> RELEASE_NOTES.md
+          (cd dist && sha256sum *.exe) | awk '{print "| "$2" | "$1" |"}' >> RELEASE_NOTES.md
 
       - name: Resolve tag name
         id: tag
@@ -228,8 +122,4 @@ jobs:
           draft: false
           prerelease: false
           fail_on_unmatched_files: true
-          files: |
-            dist/*.zip
-            dist/*.exe
-            dist/*.dmg
-            dist/*.deb
+          files: dist/*.exe
