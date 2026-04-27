@@ -1885,6 +1885,22 @@ public class ApplicationController extends TextWebSocketHandler implements Initi
                     return;
                 }
 
+                // The install4j updater (application id "504" in the legacy
+                // asciidocfx.install4j project) only works when the JVM is
+                // launched by an install4j-generated executable; otherwise
+                // ApplicationLauncher pops a native "selected application 504
+                // could not be instantiated" dialog before throwing.
+                // install4j has been replaced by Inno Setup for Windows
+                // releases (see installer/windows/asciidocfx.iss); GitHub
+                // Releases now serves updates. Skip the in-app updater
+                // entirely when not running inside an install4j launcher.
+                if (System.getProperty("install4j.appDir") == null
+                        && System.getProperty("install4j.exeDir") == null) {
+                    logger.debug("Skipping install4j auto-update check "
+                            + "(JVM not launched by install4j).");
+                    return;
+                }
+
                 HttpResponse.BodySubscriber<String> bodySubscriber = HttpResponse.BodySubscribers.ofString(Charset.defaultCharset());
                 int statusCode = HttpClient.newBuilder().followRedirects(HttpClient.Redirect.NEVER)
                         .build()

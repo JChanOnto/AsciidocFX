@@ -140,6 +140,24 @@ public class AppStarter extends Application {
     }
 
     public static void registerAssociatedFileHandler() {
+        // The install4j StartupNotification API only works when the JVM is
+        // launched by an install4j-generated executable; when launched any
+        // other way (Inno Setup wrapper bat, scripts/run.ps1, mvn
+        // spring-boot:run, plain java -jar) it pops a native "Could not
+        // open config file" / "selected application could not be
+        // instantiated" dialog before throwing, which the surrounding
+        // try/catch cannot suppress. Detect install4j by the system
+        // properties its launcher injects (install4j.appDir, etc.) and
+        // skip the registration entirely otherwise. File associations are
+        // still wired up by the Inno Setup installer through the standard
+        // shell "open with" mechanism — those paths arrive on argv and
+        // are handled by parseCmdArgs.
+        if (System.getProperty("install4j.appDir") == null
+                && System.getProperty("install4j.exeDir") == null) {
+            logger.debug("Skipping install4j StartupNotification registration "
+                    + "(JVM not launched by install4j).");
+            return;
+        }
         StartupNotification.registerStartupListener(parameters -> {
             startupParameters.set(parameters);
             startupParameterLatch.countDown();
