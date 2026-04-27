@@ -16,12 +16,14 @@
         <maven.compiler.source>${java.version}</maven.compiler.source>
         <maven.compiler.target>${java.version}</maven.compiler.target>
         <mainClass>com.kodedu.boot.AppStarter</mainClass>
+        <!--
+          install4j.version is retained ONLY to pin the install4j-runtime jar
+          dependency (used by AppStarter / ApplicationController for in-app
+          launcher integration). The proprietary install4j installer toolchain
+          itself has been replaced by free Inno Setup (Windows) / hdiutil (mac)
+          / dpkg-deb (linux); see installer/ and scripts/internal/build_*_installer.*
+        -->
         <install4j.version>10.0.8</install4j.version>
-        <install4j.home>${env.GITHUB_WORKSPACE}/install4j${install4j.version}</install4j.home>
-        <install4j.licenseKey>${env.LICENSE_KEY_10}</install4j.licenseKey>
-        <install4j.macKeyStorePassword>${env.MAC_KEYSTORE_PASSWORD}</install4j.macKeyStorePassword>
-        <install4j.appSpecificPassword>${env.MAC_APP_PASSWORD}</install4j.appSpecificPassword>
-        <install4j.winKeyStorePassword>${env.WIN_KEYSTORE_PASSWORD}</install4j.winKeyStorePassword>
         <openjfx.version>25-ea+21</openjfx.version>
         <!--
           Default JavaFX SDK module-path. Auto-set per OS by the
@@ -677,35 +679,13 @@
                 </plugins>
             </build>
         </profile>
-        <profile>
-            <id>install4j-build</id>
-            <build>
-                <plugins>
-                    <plugin>
-                        <groupId>com.install4j</groupId>
-                        <artifactId>install4j-maven</artifactId>
-                        <version>${install4j.version}</version>
-                        <executions>
-                            <execution>
-                                <id>compile-installers</id>
-                                <phase>package</phase>
-                                <goals>
-                                    <goal>compile</goal>
-                                </goals>
-                                <configuration>
-                                    <projectFile>${project.basedir}/asciidocfx.install4j</projectFile>
-                                    <installDir>${install4j.home}</installDir>
-                                    <license>${install4j.licenseKey}</license>
-                                    <macKeystorePassword>${install4j.macKeyStorePassword}</macKeystorePassword>
-                                    <winKeystorePassword>${install4j.winKeyStorePassword}</winKeystorePassword>
-                                    <appleIdPassword>${install4j.appSpecificPassword}</appleIdPassword>
-                                </configuration>
-                            </execution>
-                        </executions>
-                    </plugin>
-                </plugins>
-            </build>
-        </profile>
+        <!--
+            The previous install4j-build profile (which invoked install4j-maven
+            to produce signed native installers) has been removed. Native
+            installers are now built post-package by the free toolchain in
+            scripts/internal/build_{windows,macos,linux}_installer.{ps1,sh}.
+            See installer/windows/asciidocfx.iss for the Inno Setup script.
+        -->
         <profile>
             <id>local-run</id>
             <build>

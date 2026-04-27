@@ -9,12 +9,15 @@
 #   * push of a tag matching v*  -> builds + creates a draft release for that tag
 #   * workflow_dispatch          -> manual trigger; enter the tag name in the UI
 #
-# This workflow does NOT require an install4j license or code-signing
-# certificates — it only produces the portable zip artifact, not native
-# installers. The existing .github/workflows/maven.yml continues to handle
-# the signed install4j-built installers (.dmg/.exe/.deb/.rpm).
+# In addition to the portable zips, this workflow now also builds free,
+# unsigned native installers via open-source toolchains:
+#   * Windows : Inno Setup 6 -> AsciidocFX-<ver>-Setup.exe   (REQUIRED)
+#   * macOS   : hdiutil      -> AsciidocFX-<ver>.dmg         (best-effort)
+#   * Linux   : dpkg-deb     -> asciidocfx_<ver>_amd64.deb   (best-effort)
+#
+# No install4j license or paid code-signing cert is required.
 
-name: Release (portable zips from scripts/build)
+name: Release (portable zips + installers)
 
 on:
   workflow_dispatch:
@@ -111,7 +114,8 @@ jobs:
       # Run setup with --skip-prereqs / -SkipPrereqs to avoid re-installing the
       # toolchain (already provided above by setup-java / setup-node / brew /
       # apt / choco). This step downloads the JavaFX SDK and bundles a portable
-      # CRuby runtime into ruby-runtime/<os>/ so the install4j-package profile
+      # CRuby runtime into ruby-runtime/<os>/ so the install4j-package maven
+      # profile (now used only for the appassembler payload, not install4j)
       # picks it up and ships the fast native-Ruby PDF render path.
       - name: Ensure shell scripts are executable (mac/linux)
         if: runner.os != 'Windows'
@@ -125,21 +129,66 @@ jobs:
       - name: Build portable zip (with bundled Ruby)
         run: ${{ matrix.build_cmd }}
 
-      - name: Stage release artifact
+      # ---------------- Native installers (free toolchains) ----------------
+
+      - name: Install Inno Setup (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: choco install innosetup --no-progress -y
+
+      - name: Build Windows installer (Inno Setup)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          ./scripts/internal/build_windows_installer.ps1 `
+            -JavaHome "$env:JAVA_HOME" `
+            -OutputDir "$PWD/target"
+
+      - name: Build macOS installer (.dmg)
+        if: matrix.os == 'macos-latest'
+        shell: bash
+        run: |
+          chmod +x scripts/internal/build_macos_installer.sh
+          ./scripts/internal/build_macos_installer.sh \
+            --java-home "$JAVA_HOME" \
+            --output "$PWD/target"
+
+      - name: Build Linux installer (.deb)
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          chmod +x scripts/internal/build_linux_installer.sh
+          ./scripts/internal/build_linux_installer.sh \
+            --java-home "$JAVA_HOME" \
+            --output "$PWD/target"
+
+      # ---------------- Stage + upload artifacts ----------------
+
+      - name: Stage release artifacts
         shell: bash
         run: |
           mkdir -p staging
-          # Rename per-OS so artifacts don't collide in the release.
+          # Rename portable zips per-OS so artifacts don't collide.
           for f in target/asciidocfx-*.zip; do
+            [ -e "$f" ] || continue
             base="$(basename "$f" .zip)"
             cp "$f" "staging/${base}-${{ matrix.label }}.zip"
+          done
+          # Native installers (already uniquely named per OS).
+          for f in target/AsciidocFX-*-Setup.exe target/AsciidocFX-*.dmg target/asciidocfx_*.deb; do
+            [ -e "$f" ] || continue
+            cp "$f" "staging/$(basename "$f")"
           done
           ls -l staging
 
       - uses: actions/upload-artifact@v4
         with:
           name: asciidocfx-${{ matrix.label }}
-          path: staging/*.zip
+          path: |
+            staging/*.zip
+            staging/*.exe
+            staging/*.dmg
+            staging/*.deb
           if-no-files-found: error
 
   release:
@@ -160,7 +209,7 @@ jobs:
           echo "## SHA-256" >> RELEASE_NOTES.md
           echo "| File | SHA-256 |" >> RELEASE_NOTES.md
           echo "| --- | --- |" >> RELEASE_NOTES.md
-          (cd dist && sha256sum *.zip) | awk '{print "| "$2" | "$1" |"}' >> RELEASE_NOTES.md
+          (cd dist && sha256sum *.zip *.exe *.dmg *.deb 2>/dev/null) | awk '{print "| "$2" | "$1" |"}' >> RELEASE_NOTES.md
 
       - name: Resolve tag name
         id: tag
@@ -179,4 +228,8 @@ jobs:
           draft: false
           prerelease: false
           fail_on_unmatched_files: true
-          files: dist/*.zip
+          files: |
+            dist/*.zip
+            dist/*.exe
+            dist/*.dmg
+            dist/*.deb
